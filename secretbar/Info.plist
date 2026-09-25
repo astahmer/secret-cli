@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>SecretBar</string>
+  <key>CFBundleDisplayName</key>
+  <string>SecretBar</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.astahmer.secretbar</string>
+  <key>CFBundleExecutable</key>
+  <string>secretbar</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <!-- Menu bar agent app: never shows a Dock icon at launch. When the user
+       disables the menu bar icon (secretbar.showInMenuBar=false) the app
+       restores a regular activation policy at runtime so the Dock becomes
+       the entry point again. -->
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

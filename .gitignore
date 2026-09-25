@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+.DS_Store
+.secret.json
+.secret.local.json
+.env
+.env.*
+*.local.json
+session
+session.*
+biometric-session
