@@ -1834,7 +1834,7 @@ func run() async {
 var rawArgs = CommandLine.arguments
 rawArgs.removeFirst()
 if rawArgs.first == "__secret-keepalive", rawArgs.count >= 2 {
-    keepaliveLoop(socket: rawArgs[1])
+    keepaliveLoop(socket: rawArgs[1], daemonPid: rawArgs.count >= 3 ? pid_t(rawArgs[2]) : nil)
 }
 
 await run()

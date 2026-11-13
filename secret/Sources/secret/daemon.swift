@@ -369,19 +369,22 @@ func daemonStop() {
     try? FileManager.default.removeItem(atPath: daemonStatePath)
 }
 
-func keepaliveLoop(socket: String) -> Never {
-    var seen = false
-    var failures = 0
+/// Watch one daemon process and clear its state when it dies. It never calls the daemon: every `bw serve` request
+/// rewrites the whole Bitwarden state file, so a 10 s `/status` ping cost ~3 GB of disk writes a day. A watcher
+/// whose daemon was replaced exits, so restarts no longer pile them up.
+func keepaliveLoop(socket: String, daemonPid: pid_t?) -> Never {
+    guard let daemonPid else { exit(0) }
     while true {
-        if seen && !exists(socket) { exit(0) }
-        if exists(socket) { seen = true }
-        if daemonRequest(socket, method: "GET", path: "/status") != nil {
-            failures = 0
-        } else {
-            failures += 1
-            if failures >= 3 { exit(0) }
-        }
+        // Sleep first: daemonStart records the new pid only once the daemon answers.
         Thread.sleep(forTimeInterval: 10)
+        if readDaemonState().map({ $0.pid != Int(daemonPid) }) ?? false { exit(0) }
+        if kill(daemonPid, 0) != 0 {
+            if readDaemonState()?.pid == Int(daemonPid) {
+                try? FileManager.default.removeItem(atPath: socket)
+                try? FileManager.default.removeItem(atPath: daemonStatePath)
+            }
+            exit(0)
+        }
     }
 }
 
@@ -393,7 +396,7 @@ func daemonStart() async -> Bool {
         return false
     }
     if let selfPath = ownExecutablePath() {
-        _ = spawnDetached(selfPath, ["__secret-keepalive", daemonSocketPath])
+        _ = spawnDetached(selfPath, ["__secret-keepalive", daemonSocketPath, String(pid)])
     }
     let deadline = Date().addingTimeInterval(8)
     while Date() < deadline {
