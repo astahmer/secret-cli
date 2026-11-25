@@ -143,7 +143,11 @@ let availableBackends = ["bitwarden", "keychain"]
 /// `"backend"` key; defaults to Bitwarden.
 func activeBackend() -> VaultBackend {
     let requested: String
-    if let raw = try? String(contentsOfFile: userConfigPath, encoding: .utf8),
+    // `SECRET_BACKEND` wins so a single command or a test can pick a backend
+    // without rewriting the user config.
+    if let override = env("SECRET_BACKEND"), !override.isEmpty {
+        requested = override
+    } else if let raw = try? String(contentsOfFile: userConfigPath, encoding: .utf8),
        let json = jsonObject(raw),
        let configured = json["backend"] as? String, !configured.isEmpty {
         requested = configured

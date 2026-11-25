@@ -44,6 +44,10 @@ struct Options {
     var store = false
     var sessionStdin = false
     var ci = false
+    var versionFlag = false
+    var caller: String?
+    var reason: String?
+    var aliases: [String] = []
 }
 
 let commandAliases: [String: String] = [
@@ -169,6 +173,22 @@ func parseOptions(_ argv: [String]) -> Options {
             options.tags = argv[index]
         } else if argument == "--value-stdin" {
             options.valueStdin = true
+        } else if argument == "--caller" {
+            index += 1
+            guard index < argv.count else { fail("--caller requires a name") }
+            options.caller = argv[index]
+        } else if argument == "--reason" {
+            index += 1
+            guard index < argv.count else { fail("--reason requires text") }
+            options.reason = argv[index]
+        } else if argument == "--alias" {
+            index += 1
+            guard index < argv.count else { fail("--alias needs alias names") }
+            options.aliases += argv[index].split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty }
+        } else if argument == "--version" || argument == "-V" {
+            options.versionFlag = true
         } else if argument == "--open" {
             options.openURL = true
         } else if argument == "--store" {
@@ -397,11 +417,54 @@ let commandHelpText: [String: String] = [
 
     Show recent secret commands (aliases only, no values).
     """,
+    "audit": """
+    Usage: secret audit [count] [--json]
+
+    Print the last audit records (default 20) from
+    ~/.local/state/secret/audit.log as JSONL. Every command appends one record
+    with caller, reason, target, outcome and cwd — never a value.
+
+      --json   Print the raw JSONL records as an array
+
+    Environment: SECRET_AUDIT_FILE, SECRET_AUDIT_DIR, SECRET_NO_AUDIT=1.
+    """,
+    "scan": """
+    Usage: secret scan [paths...] [--alias a,b] [--json] [--env NAME]
+
+    Search files (or the given paths) for the current value of every configured
+    alias. Reports file, line and alias only — the value is never printed.
+    Exits 1 when a match is found, 0 otherwise.
+
+      --alias a,b   Scan only these aliases
+      --json        Machine-readable hits
+
+    Skips .git, node_modules, .build, dist and other build directories, files
+    over 4 MiB and binary files.
+    """,
+    "mcp": """
+    Usage: secret mcp
+
+    Run a Model Context Protocol server on stdin/stdout (JSON-RPC 2.0,
+    newline-delimited). Tools: secret_list, secret_check, secret_status and
+    secret_run. secret_run injects project aliases into a child command and
+    scrubs the values from its output; no tool ever returns a value.
+
+    Wire it into an agent instead of giving it 'secret get':
+
+      {"mcpServers": {"secret": {"command": "secret", "args": ["mcp"]}}}
+
+    Audit records use the caller 'mcp' and command 'mcp:<tool>'.
+    """,
+    "version": """
+    Usage: secret version
+
+    Print the CLI version.
+    """,
 ]
 
 func printHelp() {
     print("""
-    Usage: secret <status|unlock|lock|list|search|get|set|edit|id|totp|source|pull|pin|rotate|rm|unset|mv|init|env|run|print|global|prune|unaliased|lint|doctor|recent|history> [options]
+    Usage: secret <status|unlock|lock|list|search|get|set|edit|id|totp|source|pull|pin|rotate|rm|unset|mv|init|env|run|print|global|prune|unaliased|lint|doctor|recent|history|audit|scan|mcp|version> [options]
 
     Commands:
       status (st)         Check Bitwarden auth state and print the next command to run
@@ -437,6 +500,10 @@ func printHelp() {
       doctor (d)          Validate configs, Bitwarden state, and alias resolvability
       recent              Show recently used aliases
       history             Show recent secret commands
+      audit [count]       Show the audit trail (caller, reason, outcome — no values)
+      scan [paths...]     Search files for configured values (reports file:line + alias, no values)
+      mcp                 Serve secret metadata + env-injected runs to agents over MCP
+      version             Print the CLI version
 
     Options:
       --config FILE       Use FILE instead of ./.secret.json
@@ -467,6 +534,17 @@ func printHelp() {
       --value-stdin       With edit: read the new value from stdin without putting it in argv
       --open              With source: open the source URL in the browser
       --global, -g        With set/unset/rm: operate on the global config
+      --caller NAME       Record who is calling in the audit log (default: cli, or $SECRET_CALLER)
+      --reason TEXT       Record why in the audit log (or $SECRET_REASON)
+      --alias a,b         With scan: only scan these aliases
+      --version, -V       Print the CLI version
+
+    Security:
+      Every command appends one JSONL record (no values) to
+      ~/.local/state/secret/audit.log; inspect it with 'secret audit'.
+      Agents must never run 'secret get': give them 'secret mcp' (metadata plus
+      scrubbed env-injected runs) or 'secret run -- <cmd>'. Set
+      SECRET_DENY_PLAINTEXT_GET=1 on an agent's shell to enforce that.
 
     Config precedence (later wins):
       ~/.config/secret/config.json    personal global aliases
@@ -1128,13 +1206,22 @@ func run() async {
         options.command = "set"
         options.global = true
         options.positional = Array(options.positional.dropFirst())
-    } else if options.command == "global" && options.positional.first == "unset" {
+    } else     if options.command == "global" && options.positional.first == "unset" {
         options.command = "unset"
         options.global = true
         options.positional = Array(options.positional.dropFirst())
     }
+    if options.versionFlag || options.command == "version" || options.command == "ver" {
+        print("secret \(secretVersion)")
+        return
+    }
+    auditContext.command = options.command
+    auditContext.environment = options.envName ?? "prod"
+    auditContext.caller = resolvedCaller(options.caller)
+    auditContext.reason = resolvedReason(options.reason)
     let environment = options.envName ?? "prod"
-    let loaded = options.command == "lint"
+    let configFreeCommands: Set<String> = ["lint", "audit", "mcp"]
+    let loaded = configFreeCommands.contains(options.command)
         ? LoadedConfig(definitions: [:], ordered: [], selectedAliases: nil)
         : loadDefinitions(configPath: options.configPath, environment: environment, allowUnknownEnvironment: options.command == "set")
 
@@ -1158,13 +1245,33 @@ func run() async {
 
     let vaultTouchingCommands: Set<String> = [
         "get", "set", "edit", "id", "totp", "source", "pin", "rotate",
-        "rm", "unset", "mv", "env", "run", "doctor", "pull", "list", "unaliased",
+        "rm", "unset", "mv", "env", "run", "doctor", "pull", "list", "unaliased", "scan",
     ]
     if vaultTouchingCommands.contains(options.command) {
         maybeBootstrapBiometricSession()
     }
 
     switch options.command {
+    case "mcp":
+        await runMCPServer()
+
+    case "version":
+        print("secret \(secretVersion)")
+
+    case "audit":
+        printAudit(count: Int(options.positional.first ?? "") ?? 20, json: options.json)
+
+    case "scan":
+        let paths = options.positional.isEmpty ? ["."] : options.positional
+        let status = await scanSecrets(loaded: loaded, paths: paths, onlyAliases: options.aliases, json: options.json)
+        auditWrite(
+            outcome: status == 0 ? "ok" : "error",
+            error: status == 0 ? nil : "leak found",
+            command: "scan",
+            target: paths.joined(separator: " ")
+        )
+        exit(status)
+
     case "status":
         let current = await vaultBackend.authState()
         if current.unlocked {
@@ -1352,6 +1459,9 @@ func run() async {
     case "get":
         guard let alias = options.positional.first else {
             fail("get requires an alias, e.g. secret get github-token (see 'secret list')")
+        }
+        if env("SECRET_DENY_PLAINTEXT_GET") == "1", !options.copy {
+            fail("plaintext reads are disabled here (SECRET_DENY_PLAINTEXT_GET=1) — use 'secret run -- <cmd>' or 'secret mcp', or pass --copy for a human copy")
         }
         let definition = await definitionForRead(alias, loaded)
         let value = await getValue(alias, definition)
