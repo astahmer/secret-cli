@@ -122,6 +122,7 @@ func readHistory() -> [HistoryEntry] {
 }
 
 func recordHistory(entry: HistoryEntry) {
+    auditWrite(outcome: "ok", command: entry.cmd, target: entry.target, environment: entry.env)
     var entries = readHistory()
     entries.append(entry)
     let kept = Array(entries.suffix(historyLimit))

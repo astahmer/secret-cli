@@ -8,7 +8,9 @@ import Glibc
 // MARK: - Paths
 
 let home = ProcessInfo.processInfo.environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
-let configDir = "\(home)/.config/secret"
+// `SECRET_CONFIG_DIR` isolates config, history, session and daemon state
+// (tests, CI, and machines that keep XDG state elsewhere).
+let configDir = ProcessInfo.processInfo.environment["SECRET_CONFIG_DIR"] ?? "\(home)/.config/secret"
 let userConfigPath = "\(configDir)/config.json"
 let historyPath = "\(configDir)/history.json"
 let sessionPath = ProcessInfo.processInfo.environment["SECRET_SESSION_FILE"] ?? "\(configDir)/session"
@@ -46,6 +48,7 @@ func writeErr(_ text: String) {
 
 func fail(_ message: String) -> Never {
     writeErr(errColor("31", "secret: \(message)\n"))
+    auditWrite(outcome: "error", error: message)
     exit(1)
 }
 
