@@ -9,3 +9,7 @@
 session
 session.*
 biometric-session
+
+# python test cache
+__pycache__/
+build/
