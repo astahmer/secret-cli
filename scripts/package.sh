@@ -76,9 +76,14 @@ echo "==> $DIST/$NAME.tar.gz"
 cat "$DIST/SHA256SUMS"
 
 if [ "$FORMULA" -eq 1 ]; then
-  URL_ARM="https://github.com/astahmer/secret-cli/releases/download/v$VERSION/secret-$VERSION-arm64.tar.gz"
-  URL_INTEL="https://github.com/astahmer/secret-cli/releases/download/v$VERSION/secret-$VERSION-x86_64.tar.gz"
-  if [ "$LABEL" = "universal" ]; then URL_INTEL=$URL_ARM; fi
+  # The asset name carries the LABEL, not the raw architecture: a universal
+  # build ships secret-<version>-universal.tar.gz and nothing else, so both
+  # architecture branches must point at it.
+  URL_ARM="https://github.com/astahmer/secret-cli/releases/download/v$VERSION/secret-$VERSION-$LABEL.tar.gz"
+  URL_INTEL=$URL_ARM
+  if [ "$LABEL" != "universal" ]; then
+    URL_INTEL="https://github.com/astahmer/secret-cli/releases/download/v$VERSION/secret-$VERSION-x86_64.tar.gz"
+  fi
   cat > "$DIST/secret.rb" <<RUBY
 class Secret < Formula
   desc "Value-minimizing secret manager for configured aliases"
@@ -98,6 +103,13 @@ class Secret < Formula
 
   def install
     bin.install "secret-$VERSION-$LABEL/secret" => "secret"
+  end
+
+  def caveats
+    <<~EOS
+      The `bw` CLI (Bitwarden) or the macOS Keychain backend is required to store
+      values. Run `secret status` to check the backend, `secret list` to see aliases.
+    EOS
   end
 
   test do
