@@ -99,6 +99,8 @@ universal CLI tarball, checksums and the Homebrew formula. Pushing a `v*` tag
 runs `.github/workflows/release.yml`, which publishes the tarball and updates
 the tap when `HOMEBREW_TAP_TOKEN` is set. `tests/e2e.py` is the end-to-end suite
 (fake `bw`, isolated config): `python3 tests/e2e.py` after a release build.
+`tests/bench-mcp.mjs` compares per-call CLI subprocesses against one long-lived
+`secret mcp` server (`BENCH_WORKERS=1,4,8 node tests/bench-mcp.mjs`).
 
 ## Repository layout
 

@@ -17,7 +17,36 @@ let mcpMaximumTimeout = 300.0
 
 func mcpSend(_ payload: J) {
     let line = jStringify(payload, pretty: false) + "\n"
+    // Tool calls answer concurrently, so a whole line is written under one lock
+    // to keep frames from interleaving.
+    mcpWriteLock.lock()
+    defer { mcpWriteLock.unlock() }
     FileHandle.standardOutput.write(Data(line.utf8))
+}
+
+private let mcpWriteLock = NSLock()
+
+/// How many tool calls may run at once. `secret_run` spawns a child, so this is
+/// a process budget, not a thread count.
+let mcpMaxConcurrentCalls = 8
+
+/// Vault items change rarely and every check/run needs the same metadata. A
+/// one-second cache turns a fan-out of tool calls into one vault read; a changed
+/// value is still picked up on the next call after the window.
+let mcpItemsTTL: TimeInterval = 1.0
+private let mcpItemsLock = NSLock()
+private var mcpItemsCached: (items: [JSON]?, at: Date)?
+
+func mcpVaultItems() async -> [JSON]? {
+    mcpItemsLock.lock()
+    let cached = mcpItemsCached
+    mcpItemsLock.unlock()
+    if let cached, Date().timeIntervalSince(cached.at) < mcpItemsTTL { return cached.items }
+    let items = await vaultBackend.items()
+    mcpItemsLock.lock()
+    mcpItemsCached = (items, Date())
+    mcpItemsLock.unlock()
+    return items
 }
 
 func mcpResponse(id: J?, result: J) {
@@ -98,33 +127,47 @@ func mcpRunCaptured(
     secrets: [String],
     timeout: Double
 ) -> MCPRunOutcome {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: executable)
-    process.arguments = args
-    process.environment = environment
-    process.standardInput = FileHandle.nullDevice
-    let outPipe = Pipe()
-    let errPipe = Pipe()
-    process.standardOutput = outPipe
-    process.standardError = errPipe
-    do {
-        try process.run()
-    } catch {
-        return MCPRunOutcome(
-            status: 127,
-            stdout: "",
-            stderr: "could not launch \(executable): \(error.localizedDescription)",
-            timedOut: false
-        )
+    var outFDs: [Int32] = [0, 0]
+    var errFDs: [Int32] = [0, 0]
+    guard pipe(&outFDs) == 0, pipe(&errFDs) == 0 else {
+        return MCPRunOutcome(status: 127, stdout: "", stderr: "could not create pipes", timedOut: false)
     }
+    // The Bitwarden CLI path uses posix_spawn; Foundation.Process pays extra
+    // setup and showed up as per-call latency under concurrent tool calls.
+    // stdin must never be the server's protocol stream.
+    let nullFD = open("/dev/null", O_RDONLY)
+    guard let pid = posixSpawnChild(
+        executable,
+        args,
+        env: environment,
+        stdinFD: nullFD,
+        stdoutFD: outFDs[1],
+        stderrFD: errFDs[1]
+    ) else {
+        close(nullFD)
+        close(outFDs[0])
+        close(outFDs[1])
+        close(errFDs[0])
+        close(errFDs[1])
+        return MCPRunOutcome(status: 127, stdout: "", stderr: "could not launch \(executable)", timedOut: false)
+    }
+    close(outFDs[1])
+    close(errFDs[1])
+    close(nullFD)
 
     let outBuffer = MCPOutputBuffer(limit: mcpMaxOutputBytes)
     let errBuffer = MCPOutputBuffer(limit: mcpMaxOutputBytes)
     let outScrubber = StreamScrubber(secrets: secrets)
     let errScrubber = StreamScrubber(secrets: secrets)
     let drainGroup = DispatchGroup()
+    // A raw FileHandle wrapped around a descriptor is not retained by the
+    // handler; keep it alive until the stream drains, or its deinit closes the
+    // fd before anything is read.
+    var handles: [FileHandle] = []
 
-    func pump(_ handle: FileHandle, _ scrubber: StreamScrubber, _ buffer: MCPOutputBuffer) {
+    func pump(_ descriptor: Int32, _ scrubber: StreamScrubber, _ buffer: MCPOutputBuffer) {
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        handles.append(handle)
         drainGroup.enter()
         handle.readabilityHandler = { reader in
             let chunk = reader.availableData
@@ -137,26 +180,30 @@ func mcpRunCaptured(
             }
         }
     }
-    pump(outPipe.fileHandleForReading, outScrubber, outBuffer)
-    pump(errPipe.fileHandleForReading, errScrubber, errBuffer)
+    pump(outFDs[0], outScrubber, outBuffer)
+    pump(errFDs[0], errScrubber, errBuffer)
 
-    let semaphore = DispatchSemaphore(value: 0)
+    var status: Int32 = 0
+    let waitGroup = DispatchGroup()
+    waitGroup.enter()
     DispatchQueue.global(qos: .userInitiated).async {
-        process.waitUntilExit()
-        semaphore.signal()
+        waitpid(pid, &status, 0)
+        waitGroup.leave()
     }
     var timedOut = false
-    if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+    if waitGroup.wait(timeout: .now() + timeout) == .timedOut {
         timedOut = true
-        process.terminate()
-        if semaphore.wait(timeout: .now() + 5) == .timedOut {
-            kill(process.processIdentifier, SIGKILL)
-            _ = semaphore.wait(timeout: .now() + 2)
+        kill(pid, SIGTERM)
+        if waitGroup.wait(timeout: .now() + 5) == .timedOut {
+            kill(pid, SIGKILL)
+            _ = waitGroup.wait(timeout: .now() + 2)
         }
     }
     _ = drainGroup.wait(timeout: .now() + 5)
+    for handle in handles { handle.readabilityHandler = nil }
+    handles.removeAll()
     return MCPRunOutcome(
-        status: process.terminationStatus,
+        status: exitStatus(status),
         stdout: outBuffer.text(),
         stderr: errBuffer.text(),
         timedOut: timedOut
@@ -288,7 +335,7 @@ func mcpCallCheck(_ args: J?) async -> J {
     guard let definition = loaded.definitions[alias] else {
         return mcpText("unknown alias: \(alias) (\(loaded.ordered.count) declared aliases; call secret_list)", isError: true)
     }
-    let items = await vaultBackend.items()
+    let items = await mcpVaultItems()
     let available = resolveOptional(items, definition) != nil
     var expired = false
     if let expiresAt = definition.expiresAt, let date = parseExpiry(expiresAt) {
@@ -353,7 +400,7 @@ func mcpCallRun(_ args: J?) async -> J {
         return mcpText("no project config (.secret.json) found in \(FileManager.default.currentDirectoryPath) — pass configPath", isError: true)
     }
 
-    let items = await vaultBackend.items()
+    let items = await mcpVaultItems()
     var environment = ProcessInfo.processInfo.environment
     var secrets: [String] = []
     var injected: [String] = []
@@ -378,13 +425,21 @@ func mcpCallRun(_ args: J?) async -> J {
     }
 
     let executable = command[0].contains("/") ? command[0] : (pathTo(command[0]) ?? command[0])
-    let outcome = mcpRunCaptured(
-        executable,
-        Array(command.dropFirst()),
-        environment: environment,
-        secrets: secrets,
-        timeout: timeout
-    )
+    // mcpRunCaptured blocks on a child process; run it off the cooperative pool
+    // so concurrent tool calls keep their own threads instead of starving.
+    let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<MCPRunOutcome, Never>) in
+        DispatchQueue.global(qos: .userInitiated).async {
+            continuation.resume(
+                returning: mcpRunCaptured(
+                    executable,
+                    Array(command.dropFirst()),
+                    environment: environment,
+                    secrets: secrets,
+                    timeout: timeout
+                )
+            )
+        }
+    }
     auditWrite(
         outcome: outcome.timedOut || outcome.status != 0 ? "error" : "ok",
         error: outcome.timedOut ? "timeout after \(Int(timeout))s" : nil,
@@ -445,6 +500,8 @@ func runMCPServer() async -> Never {
     auditContext.command = "mcp"
     auditContext.source = "mcp"
     auditContext.caller = resolvedCaller(nil)
+    let inFlight = DispatchGroup()
+    let budget = DispatchSemaphore(value: mcpMaxConcurrentCalls)
     while let line = readLine(strippingNewline: true) {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { continue }
@@ -465,13 +522,26 @@ func runMCPServer() async -> Never {
         case "tools/list":
             mcpResponse(id: id, result: mcpToolsList())
         case "tools/call":
-            mcpResponse(id: id, result: await mcpToolCall(params))
+            // A slow tool (a child process, a vault read) must not block the
+            // next call: an agent fanning out runs would otherwise serialize.
+            budget.wait()
+            inFlight.enter()
+            Task {
+                let result = await mcpToolCall(params)
+                mcpResponse(id: id, result: result)
+                inFlight.leave()
+                budget.signal()
+            }
         case "shutdown":
+            inFlight.wait()
             mcpResponse(id: id, result: .obj([]))
             exit(0)
         default:
             mcpFailure(id: id, code: -32601, message: "method not found: \(method)")
         }
     }
+    // Let queued calls finish before the process exits, so a client that closes
+    // stdin still gets its answers.
+    inFlight.wait()
     exit(0)
 }

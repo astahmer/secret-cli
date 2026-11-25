@@ -5,7 +5,7 @@ import Darwin
 import Glibc
 #endif
 
-let secretVersion = "2.1.2"
+let secretVersion = "2.1.3"
 
 // MARK: - Audit log
 

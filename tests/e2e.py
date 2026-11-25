@@ -70,7 +70,7 @@ def main():
     run(["set", "E2E_OTHER", "--force"], "synthetic-other-value-zzz999\n")
 
     out = run(["version"]).stdout.strip()
-    check("version", out == "secret 2.1.2", out)
+    check("version", out == "secret 2.1.3", out)
 
     result = run(["get", "E2E_TOKEN"])
     check("get", result.stdout.strip() == "synthetic-e2e-value-abc123", result.stderr)
@@ -137,7 +137,7 @@ def main():
     def text_of(reply_id):
         return replies[reply_id]["result"]["content"][0]["text"]
 
-    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.1.2")
+    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.1.3")
     names = [tool["name"] for tool in replies[2]["result"]["tools"]]
     check("mcp tools/list", set(names) == {"secret_list", "secret_check", "secret_status", "secret_run"}, names)
     listing = json.loads(text_of(3))
