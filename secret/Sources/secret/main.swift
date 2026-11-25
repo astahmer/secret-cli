@@ -240,10 +240,18 @@ let commandHelpText: [String: String] = [
     "get": """
     Usage: secret get <alias> [--copy] [--env NAME]
 
-    Print exactly one configured value.
+    Print exactly one value: a configured alias, or a unique vault item named
+    global/<alias> when no config declares it (the vault works across machines).
 
       --copy       Copy to the clipboard instead of stdout
       --env NAME   Environment override (default: prod)
+    """,
+    "unaliased": """
+    Usage: secret unaliased [--json]
+
+    List vault items under global/ that no global alias declares. They still
+    resolve on read, so another machine needs only the vault. Declaring an alias
+    adds an env key, a field, id pinning and doctor coverage.
     """,
     "set": """
     Usage: secret set [<alias>] [--generate] [--force] [--source URL] [--name NAME] [--notes TEXT] [--type login|secure-note] [--expires-at DATE] [--tags TAGS] [--global]
@@ -393,7 +401,7 @@ let commandHelpText: [String: String] = [
 
 func printHelp() {
     print("""
-    Usage: secret <status|unlock|lock|list|search|get|set|edit|id|totp|source|pull|pin|rotate|rm|unset|mv|init|env|run|print|global|prune|lint|doctor|recent|history> [options]
+    Usage: secret <status|unlock|lock|list|search|get|set|edit|id|totp|source|pull|pin|rotate|rm|unset|mv|init|env|run|print|global|prune|unaliased|lint|doctor|recent|history> [options]
 
     Commands:
       status (st)         Check Bitwarden auth state and print the next command to run
@@ -424,6 +432,7 @@ func printHelp() {
       print (pr) [scope]  Show aliases in project (default), global, or local; --all merges scopes
       global              Show the global (user) scope aliases
       prune [--dry-run]   Remove config aliases whose vault items no longer exist
+      unaliased [--json]  Vault items under global/ with no alias; get still resolves them by name
       lint                Validate configs offline: items, env keys, collisions (no vault)
       doctor (d)          Validate configs, Bitwarden state, and alias resolvability
       recent              Show recently used aliases
@@ -790,6 +799,57 @@ func resolveOptional(_ items: [JSON]?, _ definition: SecretDefinition) -> String
     valueFor(itemFor(items, definition.item), definition)
 }
 
+// MARK: - Vault-as-registry fallback
+
+// The vault is the shared registry across machines: `secret set ALIAS --global` names its item
+// global/<alias>. A read therefore still resolves when no config declares the alias but the vault holds
+// exactly one item with that name. Config always wins, an ambiguous name refuses instead of guessing,
+// and mutations plus env injection stay config-only because they need a field, an env key or an intent.
+let globalItemPrefix = "global"
+
+func vaultFallbackDefinition(_ alias: String) async -> SecretDefinition? {
+    guard validAlias(alias) else { return nil }
+    let wanted = "\(globalItemPrefix)/\(kebab(alias))"
+    let items = await vaultBackend.items() ?? []
+    let matches = items.filter { ($0["name"] as? String) == wanted }
+    if matches.count > 1 {
+        fail("ambiguous alias: \(matches.count) vault items are named \(wanted); declare one with 'secret set \(alias) --global'")
+    }
+    guard matches.count == 1 else { return nil }
+    return SecretDefinition(item: wanted, field: "password")
+}
+
+/// A definition for reading a value: the declared alias, else the unique vault item named after it.
+func definitionForRead(_ alias: String, _ loaded: LoadedConfig) async -> SecretDefinition {
+    if let known = loaded.definitions[alias] { return known }
+    if let fallback = await vaultFallbackDefinition(alias) { return fallback }
+    fail("unknown alias: \(alias) (no config entry, and no unique vault item named \(globalItemPrefix)/\(kebab(alias))) (see 'secret list')")
+}
+
+/// Global items no alias in the user config declares, one row per unique name: exactly what the read fallback
+/// reaches and `secret list` cannot show. A name the vault stores twice is left out, because the fallback refuses
+/// an ambiguous name instead of picking one.
+func unaliasedGlobalItems() async -> [(alias: String, item: String)] {
+    let user = exists(userConfigPath) ? readConfig(userConfigPath) : nil
+    var declared = Set<String>()
+    func collect(_ secrets: J?) {
+        for (_, definition) in secrets?.pairs() ?? [] {
+            if let item = definition.get("item")?.string() { declared.insert(item) }
+        }
+    }
+    collect(user?.get("secrets"))
+    for (_, environment) in user?.get("environments")?.pairs() ?? [] { collect(environment.get("secrets")) }
+    var counts: [String: Int] = [:]
+    for item in await vaultBackend.items() ?? [] {
+        guard let name = item["name"] as? String else { continue }
+        counts[name, default: 0] += 1
+    }
+    return counts.compactMap { name, count -> (alias: String, item: String)? in
+        guard count == 1, name.hasPrefix("\(globalItemPrefix)/"), !declared.contains(name) else { return nil }
+        return (String(name.dropFirst(globalItemPrefix.count + 1)), name)
+    }.sorted { $0.alias < $1.alias }
+}
+
 func getValue(_ alias: String, _ definition: SecretDefinition) async -> String {
     let items = await vaultBackend.items()
     return await resolveRequired(items, alias, definition)
@@ -947,6 +1007,15 @@ func doctor(_ definitions: [(alias: String, definition: SecretDefinition)], json
     if ci { setenv("SECRET_NO_PROMPT", "1", 1) }
     var jsonRows: [String] = []
     let items = await vaultBackend.items()
+    if !json && !ci, let items {
+        let declared = Set(definitions.map { $0.definition.item })
+        let unaliased = items.compactMap { $0["name"] as? String }
+            .filter { $0.hasPrefix("\(globalItemPrefix)/") && !declared.contains($0) }
+            .sorted()
+        if !unaliased.isEmpty {
+            info("\(unaliased.count) unaliased global item(s), resolvable by name after the 'global/' prefix is dropped: \(unaliased.joined(separator: ", "))")
+        }
+    }
     var expiringSoon: [String] = []
     for (alias, definition) in definitions {
         let field = definition.field ?? "password"
@@ -1089,7 +1158,7 @@ func run() async {
 
     let vaultTouchingCommands: Set<String> = [
         "get", "set", "edit", "id", "totp", "source", "pin", "rotate",
-        "rm", "unset", "mv", "env", "run", "doctor", "pull", "list",
+        "rm", "unset", "mv", "env", "run", "doctor", "pull", "list", "unaliased",
     ]
     if vaultTouchingCommands.contains(options.command) {
         maybeBootstrapBiometricSession()
@@ -1199,6 +1268,15 @@ func run() async {
         // if bw invalidated it, the bootstrap stale-check removes it.
         writeErr(hadSession ? "secret: vault locked; stored session cleared\n" : "secret: vault locked\n")
 
+    case "unaliased":
+        let rows = await unaliasedGlobalItems()
+        if options.json {
+            print("[" + rows.map { rowJSON([("alias", $0.alias), ("item", $0.item), ("field", "password")]) }.joined(separator: ",") + "]")
+        } else {
+            for row in rows { print("\(row.alias)\t\(row.item)") }
+            writeErr("secret: \(rows.count) unaliased global item(s). next: secret get <alias>, or 'secret set <alias> --global' to declare one\n")
+        }
+
     case "list":
         let entries = loaded.ordered
         if options.json {
@@ -1275,7 +1353,7 @@ func run() async {
         guard let alias = options.positional.first else {
             fail("get requires an alias, e.g. secret get github-token (see 'secret list')")
         }
-        guard let definition = loaded.definitions[alias] else { fail("unknown alias: \(alias) (see 'secret list')") }
+        let definition = await definitionForRead(alias, loaded)
         let value = await getValue(alias, definition)
         recordHistory(entry: HistoryEntry(at: isoNow(), cmd: "get", target: alias, env: environment))
         if options.copy {
@@ -1427,7 +1505,7 @@ func run() async {
         guard let alias = options.positional.first else {
             fail("id requires an alias, e.g. secret id github-token (see 'secret list')")
         }
-        guard let definition = loaded.definitions[alias] else { fail("unknown alias: \(alias) (see 'secret list')") }
+        let definition = await definitionForRead(alias, loaded)
         let items = await vaultBackend.items()
         guard let item = itemFor(items, definition.item) else {
             await vaultBackend.requireUnlocked()
@@ -1441,7 +1519,7 @@ func run() async {
         guard let alias = options.positional.first else {
             fail("totp requires an alias, e.g. secret totp github-token (see 'secret list')")
         }
-        guard let definition = loaded.definitions[alias] else { fail("unknown alias: \(alias) (see 'secret list')") }
+        let definition = await definitionForRead(alias, loaded)
         await vaultBackend.requireUnlocked()
         let code = vaultBackend.totp(itemName: definition.item)
         recordHistory(entry: HistoryEntry(at: isoNow(), cmd: "totp", target: alias, env: environment))
@@ -1456,7 +1534,10 @@ func run() async {
         guard let alias = options.positional.first else {
             fail("source requires an alias, e.g. secret source github-token")
         }
-        guard let definition = loaded.definitions[alias] else { fail("unknown alias: \(alias) (see 'secret list')") }
+        let definition = await definitionForRead(alias, loaded)
+        if loaded.definitions[alias] == nil, options.positional.count > 1 {
+            fail("source needs a declared alias before it can store a URL; run 'secret set \(alias) --global' first")
+        }
         let url = options.positional.count > 1 ? options.positional[1] : nil
         let items = await vaultBackend.items()
         guard let item = itemFor(items, definition.item) else {
