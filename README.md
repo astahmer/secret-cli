@@ -18,7 +18,7 @@ curl -sSfL https://raw.githubusercontent.com/astahmer/secret-cli/main/install.sh
 ```
 
 It installs to `/usr/local/bin` when writable, else `~/.local/bin`; pin a version
-with `SECRET_VERSION=v2.1.0`, relocate with `SECRET_INSTALL_DIR`.
+with `SECRET_VERSION=v2.1.1`, relocate with `SECRET_INSTALL_DIR`.
 
 Nix users get it from [nixfiles](https://github.com/astahmer/nixfiles), which packages the same source.
 

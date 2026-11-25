@@ -23,7 +23,11 @@ jobs:
           uname -m
 
       - name: build + package
-        run: ./scripts/package.sh --universal --formula
+        env:
+          SECRET_EXPECTED_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          expected=$(printf '%s' "$SECRET_EXPECTED_VERSION" | sed 's/^v//')
+          SECRET_EXPECTED_VERSION="$expected" ./scripts/package.sh --universal --formula
 
       - name: smoke test the packaged binary
         run: |

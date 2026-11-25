@@ -50,6 +50,10 @@ if [ ! -x "$SECRET_BIN" ]; then
   SECRET_BIN="$ROOT/secret/.build/release/secret"
 fi
 VERSION=$("$SECRET_BIN" version | awk '{print $2}')
+if [ -n "${SECRET_EXPECTED_VERSION:-}" ] && [ "$VERSION" != "$SECRET_EXPECTED_VERSION" ]; then
+  echo "error: binary reports $VERSION but the release tag is $SECRET_EXPECTED_VERSION — bump secretVersion in secret/Sources/secret/audit.swift" >&2
+  exit 1
+fi
 LABEL=$(printf '%s-' "${ARCHS[@]}")
 LABEL=${LABEL%-}
 if [ "${#ARCHS[@]}" -gt 1 ]; then LABEL=universal; fi
