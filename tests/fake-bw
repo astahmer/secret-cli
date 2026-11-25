@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Fake Bitwarden CLI for end-to-end tests: enough surface for the secret CLI."""
+import base64
+import json
+import os
+import sys
+
+STATE = os.environ.get("BW_FAKE_STATE", "/tmp/bw-fake-state.json")
+
+
+def load():
+    try:
+        with open(STATE, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return {"items": [], "next": 1}
+
+
+def save(state):
+    with open(STATE, "w", encoding="utf-8") as handle:
+        json.dump(state, handle)
+
+
+def main():
+    args = sys.argv[1:]
+    state = load()
+    if not args:
+        sys.exit(1)
+    command = args[0]
+    if command == "status":
+        print(json.dumps({"status": "unlocked", "serverUrl": None, "userEmail": "e2e@example.com", "userId": "e2e"}))
+        return
+    if command == "list" and args[1:2] == ["items"]:
+        print(json.dumps(state["items"]))
+        return
+    if command == "get" and args[1:2] == ["item"]:
+        name = args[2]
+        for item in state["items"]:
+            if item.get("name") == name or item.get("id") == name:
+                print(json.dumps(item))
+                return
+        sys.stderr.write("item not found\n")
+        sys.exit(1)
+    if command == "get" and args[1:2] == ["totp"]:
+        print("123456")
+        return
+    if command == "create" and args[1:2] == ["item"]:
+        payload = json.loads(base64.b64decode(sys.stdin.read().strip()))
+        payload["id"] = "id-%d" % state["next"]
+        state["next"] += 1
+        state["items"].append(payload)
+        save(state)
+        print(json.dumps(payload))
+        return
+    if command == "edit" and args[1:2] == ["item"]:
+        payload = json.loads(base64.b64decode(sys.stdin.read().strip()))
+        for index, item in enumerate(state["items"]):
+            if item.get("id") == args[2]:
+                payload["id"] = item["id"]
+                state["items"][index] = payload
+                save(state)
+                print(json.dumps(payload))
+                return
+        sys.stderr.write("item not found\n")
+        sys.exit(1)
+    if command == "delete" and args[1:2] == ["item"]:
+        target = args[2]
+        state["items"] = [i for i in state["items"] if i.get("id") != target and i.get("name") != target]
+        save(state)
+        return
+    if command in ("sync", "lock", "unlock"):
+        print("")
+        return
+    sys.stderr.write("fake bw: unsupported command %s\n" % " ".join(args))
+    sys.exit(1)
+
+
+main()

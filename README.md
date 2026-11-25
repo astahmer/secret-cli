@@ -97,7 +97,8 @@ cd secretbar && swift build -c release   # needs a full Xcode toolchain (SwiftUI
 Release artifacts: `scripts/package.sh --universal --formula` builds the
 universal CLI tarball, checksums and the Homebrew formula. Pushing a `v*` tag
 runs `.github/workflows/release.yml`, which publishes the tarball and updates
-the tap when `HOMEBREW_TAP_TOKEN` is set.
+the tap when `HOMEBREW_TAP_TOKEN` is set. `tests/e2e.py` is the end-to-end suite
+(fake `bw`, isolated config): `python3 tests/e2e.py` after a release build.
 
 ## Repository layout
 

@@ -122,8 +122,14 @@ func scanSecrets(
 ) async -> Int32 {
     let needles = await scanNeedles(loaded, onlyAliases)
     guard !needles.isEmpty else {
-        warn("scan: no resolvable configured value to search for — unlock the vault or check the alias list")
-        return 0
+        // A locked vault or a broken config is not a clean scan: saying "no
+        // match" there would make the CI gate a false green.
+        if loaded.ordered.isEmpty {
+            warn("scan: no configured aliases — add a .secret.json or run 'secret set' first")
+            return 0
+        }
+        writeErr(errColor("33", "secret scan: no configured value could be resolved — unlock the vault ('secret unlock') and re-run; scan did not look for anything\n"))
+        return 2
     }
     var hits = Set<ScanHit>()
     var filesScanned = 0

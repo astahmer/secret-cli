@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - name: build
+        run: swift build -c release
+        working-directory: secret
+
+      - name: e2e
+        run: python3 tests/e2e.py
