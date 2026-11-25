@@ -81,8 +81,12 @@ func writeAtomic(_ path: String, _ contents: String, mode: Int32 = 0o600) {
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     let tmp = "\(path).tmp.\(ProcessInfo.processInfo.processIdentifier)"
     FileManager.default.createFile(atPath: tmp, contents: Data(contents.utf8), attributes: [.posixPermissions: mode])
-    _ = try? FileManager.default.removeItem(atPath: path)
-    try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+    // rename(2) replaces the destination atomically. Removing first opened a
+    // window where a concurrent reader saw no file, and a concurrent writer
+    // left its temp file behind (the ~/.config/secret/history.json.tmp.* pile).
+    if rename(tmp, path) != 0 {
+        try? FileManager.default.removeItem(atPath: tmp)
+    }
 }
 
 func readJSONFile(_ path: String) -> JSON {
