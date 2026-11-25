@@ -10,14 +10,15 @@ Nothing to clone, nothing to build.
 brew install astahmer/tap/secret     # recommended
 ```
 
-Or take the release tarball (universal binary, Apple Silicon and Intel):
+Or the standalone installer (universal binary, Apple Silicon and Intel,
+checksum-verified, no clone and no build):
 
 ```sh
-curl -sSfL -o secret.tar.gz \
-  "https://github.com/astahmer/secret-cli/releases/latest/download/secret-$(curl -sSfL https://api.github.com/repos/astahmer/secret-cli/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')-universal.tar.gz"
-tar -xzf secret.tar.gz
-sudo install -m 755 secret-*/secret /usr/local/bin/secret
+curl -sSfL https://raw.githubusercontent.com/astahmer/secret-cli/main/install.sh | sh
 ```
+
+It installs to `/usr/local/bin` when writable, else `~/.local/bin`; pin a version
+with `SECRET_VERSION=v2.1.0`, relocate with `SECRET_INSTALL_DIR`.
 
 Nix users get it from [nixfiles](https://github.com/astahmer/nixfiles), which packages the same source.
 
