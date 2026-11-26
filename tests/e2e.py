@@ -8,6 +8,7 @@ Run from the repo root after `cd secret && swift build -c release`:
     python3 tests/e2e.py
 """
 import json
+import re
 import os
 import shutil
 import stat as statmod
@@ -72,7 +73,7 @@ def main():
     run(["set", "E2E_OTHER", "--force"], "synthetic-other-value-zzz999\n")
 
     out = run(["version"]).stdout.strip()
-    check("version", out == "secret 2.2.0", out)
+    check("version", out == "secret 2.3.0", out)
 
     result = run(["get", "E2E_TOKEN"])
     check("get", result.stdout.strip() == "synthetic-e2e-value-abc123", result.stderr)
@@ -139,7 +140,7 @@ def main():
     def text_of(reply_id):
         return replies[reply_id]["result"]["content"][0]["text"]
 
-    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.2.0")
+    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.3.0")
     names = [tool["name"] for tool in replies[2]["result"]["tools"]]
     check("mcp tools/list", set(names) == {"secret_list", "secret_check", "secret_status", "secret_run"}, names)
     listing = json.loads(text_of(3))
@@ -185,6 +186,56 @@ def main():
         }}, handle)
     mixed = run(["env", "--export"], extra=op_env)
     check("per-alias backend mix resolves both", "OP_KEY=" in mixed.stdout and "E2E_TOKEN=" in mixed.stdout, mixed.stderr)
+
+    # --- generate kinds
+    for kind, pattern in (("password", r"[A-Za-z0-9!@#$%^&*()_=+\[\]{}]{40}"), ("token", r"[A-Za-z0-9]{40}"), ("hex", r"[0-9a-f]{40}"), ("uuid", r"[0-9a-f-]{36}")):
+        generated = run(["generate", "--kind", kind, "--length", "40"]).stdout.strip()
+        check(f"generate {kind}", re.fullmatch(pattern, generated) is not None, generated)
+    phrase = run(["generate", "--kind", "passphrase", "--words", "4"]).stdout.strip()
+    check("generate passphrase", len(phrase.split("-")) == 4, phrase)
+    check("generate is random", run(["generate"]).stdout.strip() != run(["generate"]).stdout.strip())
+
+    # --- credential helpers over integrations
+    with open(os.path.join(proj, ".secret.json"), "w") as handle:
+        json.dump({
+            "secrets": {
+                "GH_TOKEN": {"item": "gh", "field": "password", "env": "GH_TOKEN"},
+                "GITLAB_TOKEN": {"item": "gl", "field": "password", "env": "GITLAB_TOKEN"},
+                "GHCR_TOKEN": {"item": "ghcr", "field": "password", "env": "GHCR_TOKEN"},
+                "PORTS": {"item": "port-ok", "field": "password", "env": "PORTS", "expect": "port"},
+                "BAD_PORT": {"item": "port-bad", "field": "password", "env": "BAD_PORT", "expect": "port"},
+            },
+            "integrations": {
+                "git": {"github.com": "GH_TOKEN", "gitlab.com/work": {"alias": "GITLAB_TOKEN", "username": "oauth2"}},
+                "docker": {"ghcr.io": {"alias": "GHCR_TOKEN", "username": "someone"}},
+            },
+        }, handle)
+    with open(env["BW_FAKE_STATE"], "w") as handle:
+        json.dump({"items": [
+            {"id": "1", "name": "gh", "login": {"password": "gh-secret-1"}},
+            {"id": "2", "name": "gl", "login": {"password": "gl-secret-2"}},
+            {"id": "3", "name": "ghcr", "login": {"password": "ghcr-secret-3"}},
+            {"id": "4", "name": "port-ok", "login": {"password": "8080"}},
+            {"id": "5", "name": "port-bad", "login": {"password": "70000"}},
+        ], "next": 6}, handle)
+    git_get = run(["git-credential", "get"], "protocol=https\nhost=github.com\npath=astahmer/repo.git\n\n")
+    check("git-credential get", git_get.stdout.split("\n")[:2] == ["username=x-access-token", "password=gh-secret-1"], git_get.stdout + git_get.stderr)
+    git_path = run(["git-credential", "get"], "protocol=https\nhost=gitlab.com\npath=work/repo.git\n\n")
+    check("git-credential path + username", "username=oauth2" in git_path.stdout and "gl-secret-2" in git_path.stdout, git_path.stdout)
+    unmapped = run(["git-credential", "get"], "protocol=https\nhost=example.com\n\n")
+    check("git-credential unmapped falls through", unmapped.returncode == 0 and unmapped.stdout.strip() == "", unmapped.stdout)
+    docker_get = run(["docker-credential", "get"], '{"ServerURL":"ghcr.io"}')
+    payload = json.loads(docker_get.stdout)
+    check("docker-credential get", payload == {"ServerURL": "ghcr.io", "Username": "someone", "Secret": "ghcr-secret-3"}, docker_get.stdout)
+    check("docker-credential list", json.loads(run(["docker-credential", "list"], "{}").stdout).get("ghcr.io") == "someone")
+    check("docker-credential unmapped fails", run(["docker-credential", "get"], '{"ServerURL":"registry.example.com"}').returncode != 0)
+
+    # --- typed values
+    typed_ok = run(["env", "--export", "--optional", "BAD_PORT"])
+    check("typed rule passes a valid value", "PORTS=" in typed_ok.stdout, typed_ok.stdout + typed_ok.stderr)
+    typed_bad = run(["env", "--export"])
+    check("typed rule blocks a bad value", typed_bad.returncode != 0 and "BAD_PORT" in typed_bad.stderr and "port" in typed_bad.stderr, typed_bad.stderr)
+    check("typed failure never prints the value", "70000" not in typed_bad.stderr + typed_bad.stdout)
 
     shutil.rmtree(work)
     print("ALL PASS" if not failures else "FAILURES: %s" % ", ".join(failures))

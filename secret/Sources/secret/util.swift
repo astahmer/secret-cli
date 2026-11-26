@@ -363,6 +363,8 @@ struct SecretDefinition {
     /// Per-alias provider override: one alias can live in 1Password while the
     /// rest use Bitwarden. Defaults to the global `backend`.
     var backend: String? = nil
+    /// Optional value rule checked before `env`/`run` hand it to a command.
+    var type: String? = nil
 }
 
 struct LoadedConfig {
@@ -382,6 +384,7 @@ func definitionInConfig(_ config: J, _ alias: String, environment: String) -> Se
     var expiresAt: String?
     var tags: [String]?
     var backend: String?
+    var type: String?
     for (key, child) in value.pairs() ?? [] {
         switch key {
         case "item": item = child.string() ?? ""
@@ -391,11 +394,14 @@ func definitionInConfig(_ config: J, _ alias: String, environment: String) -> Se
         case "expiresAt": expiresAt = child.string()
         case "tags": tags = child.items()?.compactMap { $0.string() }
         case "backend": backend = child.string()
+        // `type` already names the vault item type (login/secure-note); a value
+        // rule is declared with `expect`.
+        case "expect": type = child.string()
         default: break
         }
     }
     if item.isEmpty { fail("invalid definition for \(alias)") }
-    return SecretDefinition(item: item, field: field, envKey: envKey, itemType: itemType, expiresAt: expiresAt, tags: tags, backend: backend)
+    return SecretDefinition(item: item, field: field, envKey: envKey, itemType: itemType, expiresAt: expiresAt, tags: tags, backend: backend, type: type)
 }
 
 func dotenvKey(_ alias: String, _ definition: SecretDefinition) -> String {
@@ -499,6 +505,7 @@ func loadDefinitions(configPath: String? = nil, environment: String = "prod", al
         var expiresAt: String?
         var tags: [String]?
         var backend: String?
+        var type: String?
         for (key, val) in value.pairs() ?? [] {
             switch key {
             case "item": item = val.string() ?? ""
@@ -508,10 +515,11 @@ func loadDefinitions(configPath: String? = nil, environment: String = "prod", al
             case "expiresAt": expiresAt = val.string()
             case "tags": tags = val.items()?.compactMap { $0.string() }
             case "backend": backend = val.string()
+            case "expect": type = val.string()
             default: break
             }
         }
-        return SecretDefinition(item: item, field: field, envKey: envKey, itemType: itemType, expiresAt: expiresAt, tags: tags, backend: backend)
+        return SecretDefinition(item: item, field: field, envKey: envKey, itemType: itemType, expiresAt: expiresAt, tags: tags, backend: backend, type: type)
     }
 
     func baseSecrets(_ config: J?) -> [(String, J)] { config?.get("secrets")?.pairs() ?? [] }

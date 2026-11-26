@@ -52,6 +52,46 @@ reference never create a duplicate. `SECRET_ONEPASSWORD_VAULT` sets the vault
 name for configs that name a bare item, and `SECRET_BACKEND` forces one backend
 for a single invocation.
 
+## Generation, credential helpers and typed values
+
+```sh
+secret generate --kind password --length 40
+secret generate --kind passphrase --words 5
+secret generate --kind token|hex|base64|uuid
+```
+
+Git and Docker credential helpers read the vault instead of a copy on disk:
+
+```json
+{
+  "integrations": {
+    "git":    { "github.com": "GH_TOKEN",
+                "gitlab.com/work": { "alias": "GITLAB_TOKEN", "username": "oauth2" } },
+    "docker": { "ghcr.io": { "alias": "GHCR_TOKEN", "username": "astahmer" } }
+  }
+}
+```
+
+```sh
+git config --global credential.https://github.com.helper '!secret git-credential'
+# ~/.docker/config.json: { "credsStore": "secret" }  (symlink `secret` as docker-credential-secret)
+```
+
+An alias may declare what its value must look like; `env` and `run` refuse a
+value that does not match, without printing it:
+
+```json
+{ "PORT":    { "item": "app", "field": "port",    "expect": "port" },
+  "API_URL": { "item": "app", "field": "url",     "expect": "url" },
+  "MODE":    { "item": "app", "field": "mode",    "expect": "enum:dev,staging,prod" },
+  "STRIPE":  { "item": "app", "field": "stripe",  "expect": "string(startsWith=sk-)" } }
+```
+
+Rules: `string`, `nonempty`, `url`, `email`, `port`, `number`, `integer`,
+`boolean`, `json`, `base64`, `uuid`, `enum:a,b`, and
+`string(startsWith=…|endsWith=…|contains=…|length=N)`. `secret lint` checks the
+rule syntax offline; `secret doctor` reports a value that fails at runtime.
+
 ## Giving secrets to an agent
 
 An agent must never learn a value. Three supported paths, in order of preference:

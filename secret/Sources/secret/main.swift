@@ -48,6 +48,11 @@ struct Options {
     var caller: String?
     var reason: String?
     var aliases: [String] = []
+    var kind: String?
+    var length: Int?
+    var words: Int?
+    var separator: String?
+    var noSymbols = false
 }
 
 let commandAliases: [String: String] = [
@@ -181,6 +186,24 @@ func parseOptions(_ argv: [String]) -> Options {
             index += 1
             guard index < argv.count else { fail("--reason requires text") }
             options.reason = argv[index]
+        } else if argument == "--kind" || argument == "--type-of" {
+            index += 1
+            guard index < argv.count else { fail("--kind requires a value (password, token, hex, base64, uuid, passphrase)") }
+            options.kind = argv[index]
+        } else if argument == "--length" {
+            index += 1
+            guard index < argv.count, let value = Int(argv[index]), value > 0, value <= 4096 else { fail("--length requires a number between 1 and 4096") }
+            options.length = value
+        } else if argument == "--words" {
+            index += 1
+            guard index < argv.count, let value = Int(argv[index]), value >= 3, value <= 32 else { fail("--words requires a number between 3 and 32") }
+            options.words = value
+        } else if argument == "--separator" {
+            index += 1
+            guard index < argv.count else { fail("--separator requires a string") }
+            options.separator = argv[index]
+        } else if argument == "--no-symbols" {
+            options.noSymbols = true
         } else if argument == "--alias" {
             index += 1
             guard index < argv.count else { fail("--alias needs alias names") }
@@ -460,6 +483,43 @@ let commandHelpText: [String: String] = [
 
     Print the CLI version.
     """,
+    "generate": """
+    Usage: secret generate [--kind password|token|hex|base64|uuid|passphrase] [--length N] [--words N] [--separator S] [--no-symbols] [--copy]
+
+    Print exactly one generated value. Nothing is stored: pipe it into
+    'secret set <alias>' or use 'secret set <alias> --generate'.
+
+      --kind      password (default), token, hex, base64, uuid or passphrase
+      --length    Characters (or bytes for hex/base64); password default 32
+      --words     Words for --kind passphrase (default 5, minimum 3)
+      --separator Separator between passphrase words (default -)
+      --no-symbols  Passwords without punctuation
+      --copy      Copy to the clipboard instead of stdout
+    """,
+    "git-credential": """
+    Usage: secret git-credential <get|store|erase>
+
+    Git credential helper. Map a host to an alias in the config:
+
+      "integrations": { "git": { "github.com": "GH_TOKEN",
+                                 "gitlab.com/work": { "alias": "GITLAB_TOKEN", "username": "oauth2" } } }
+
+    Then: git config --global credential.https://github.com.helper '!secret git-credential'
+    'get' prints username/password; 'store' and 'erase' do nothing because the
+    vault owns the value. A host without a mapping exits 0 so git can fall
+    through to the next helper.
+    """,
+    "docker-credential": """
+    Usage: secret docker-credential <get|list|store|erase>
+
+    Docker credential helper. Map a registry to an alias in the config:
+
+      "integrations": { "docker": { "ghcr.io": "GHCR_TOKEN" } }
+
+    Then: docker-credential-secret on PATH (symlink this command to that name),
+    or:  "credsStore": "secret"  in ~/.docker/config.json
+    'get' answers {"ServerURL","Username","Secret"} for a mapped registry.
+    """,
 ]
 
 func printHelp() {
@@ -503,6 +563,9 @@ func printHelp() {
       audit [count]       Show the audit trail (caller, reason, outcome — no values)
       scan [paths...]     Search files for configured values (reports file:line + alias, no values)
       mcp                 Serve secret metadata + env-injected runs to agents over MCP
+      generate [--kind K] Print one generated value (password, token, key-like, passphrase)
+      git-credential      Git credential helper (get/store/erase) over integrations.git
+      docker-credential   Docker credential helper (get/list/store/erase) over integrations.docker
       version             Print the CLI version
 
     Options:
@@ -744,13 +807,18 @@ func lint(_ selectedConfig: String?, json: Bool) {
                 var item = ""
                 var field: String?
                 var envKey: String?
+                var expect: String?
                 for (key, val) in value.pairs() ?? [] {
                     switch key {
                     case "item": item = val.string() ?? ""
                     case "field": field = val.string()
                     case "env": envKey = val.string()
+                    case "expect": expect = val.string()
                     default: break
                     }
+                }
+                for issue in expect.map({ typedRuleIssues(alias: alias, raw: $0) }) ?? [] {
+                    problems.append(LintProblem(scope: source.scope, alias: alias, message: issue))
                 }
                 if item.isEmpty {
                     problems.append(LintProblem(scope: source.scope, alias: alias, message: "invalid definition (missing item)"))
@@ -1246,6 +1314,7 @@ func run() async {
     let vaultTouchingCommands: Set<String> = [
         "get", "set", "edit", "id", "totp", "source", "pin", "rotate",
         "rm", "unset", "mv", "env", "run", "doctor", "pull", "list", "unaliased", "scan",
+        "git-credential", "docker-credential",
     ]
     if vaultTouchingCommands.contains(options.command) {
         maybeBootstrapBiometricSession()
@@ -1257,6 +1326,34 @@ func run() async {
 
     case "version":
         print("secret \(secretVersion)")
+
+    case "generate":
+        let kind = SecretKind.parse(options.kind ?? "password") ?? {
+            fail("unknown --kind \(options.kind ?? "") (use password, token, hex, base64, uuid or passphrase)")
+        }()
+        let generated = generateSecret(
+            kind: kind,
+            length: options.length ?? (kind == .password ? 32 : 32),
+            words: options.words ?? 5,
+            separator: options.separator ?? "-",
+            symbols: !options.noSymbols,
+            number: true
+        )
+        auditWrite(outcome: "ok", command: "generate", target: kind.rawValue)
+        if options.copy {
+            copyToClipboardOrFail(generated)
+            success("copied generated \(kind.rawValue) to clipboard")
+        } else {
+            print(generated)
+        }
+
+    case "git-credential":
+        guard let action = options.positional.first else { fail("git-credential expects get, store or erase") }
+        await runGitCredential(action: action, selectedConfig: options.configPath)
+
+    case "docker-credential":
+        guard let action = options.positional.first else { fail("docker-credential expects get, list, store or erase") }
+        await runDockerCredential(action: action, selectedConfig: options.configPath)
 
     case "audit":
         printAudit(count: Int(options.positional.first ?? "") ?? 20, json: options.json)
@@ -1855,7 +1952,9 @@ func run() async {
                 lines.append(options.export ? "export \(key)=\(formatted)" : "\(key)=\(formatted)")
                 continue
             }
-            let value = dotenvValue(await resolveRequired(items, alias, definition))
+            let resolvedValue = await resolveRequired(items, alias, definition)
+            requireTypedValue(definition, alias: alias, value: resolvedValue)
+            let value = dotenvValue(resolvedValue)
             if let source = await resolveOptional(items, SecretDefinition(item: definition.item, field: "custom:source")) {
                 lines.append("# source: \(source)")
             }
@@ -1945,7 +2044,9 @@ func run() async {
                 envVars[key] = value
                 continue
             }
-            envVars[key] = await resolveRequired(items, alias, definition)
+            let resolvedValue = await resolveRequired(items, alias, definition)
+            requireTypedValue(definition, alias: alias, value: resolvedValue)
+            envVars[key] = resolvedValue
         }
         recordHistory(entry: HistoryEntry(at: isoNow(), cmd: "run", target: command, env: environment))
         var mergedEnv = ProcessInfo.processInfo.environment
