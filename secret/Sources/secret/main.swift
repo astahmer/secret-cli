@@ -70,6 +70,7 @@ let commandAliases: [String: String] = [
     "e": "env",
     "d": "doctor",
     "pr": "print",
+    "gen": "generate",
 ]
 
 func configPathValue(_ value: String) -> String {

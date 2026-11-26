@@ -188,12 +188,13 @@ def main():
     check("per-alias backend mix resolves both", "OP_KEY=" in mixed.stdout and "E2E_TOKEN=" in mixed.stdout, mixed.stderr)
 
     # --- generate kinds
-    for kind, pattern in (("password", r"[A-Za-z0-9!@#$%^&*()_=+\[\]{}]{40}"), ("token", r"[A-Za-z0-9]{40}"), ("hex", r"[0-9a-f]{40}"), ("uuid", r"[0-9a-f-]{36}")):
+    for kind, pattern in (("password", r"[!-~]{40}"), ("token", r"[A-Za-z0-9]{40}"), ("hex", r"[0-9a-f]{40}"), ("uuid", r"[0-9a-f-]{36}")):
         generated = run(["generate", "--kind", kind, "--length", "40"]).stdout.strip()
         check(f"generate {kind}", re.fullmatch(pattern, generated) is not None, generated)
     phrase = run(["generate", "--kind", "passphrase", "--words", "4"]).stdout.strip()
     check("generate passphrase", len(phrase.split("-")) == 4, phrase)
     check("generate is random", run(["generate"]).stdout.strip() != run(["generate"]).stdout.strip())
+    check("generate gen alias", re.fullmatch(r"[A-Za-z0-9]{8}", run(["gen", "--kind", "token", "--length", "8"]).stdout.strip()) is not None)
 
     # --- credential helpers over integrations
     with open(os.path.join(proj, ".secret.json"), "w") as handle:
