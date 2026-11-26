@@ -73,18 +73,26 @@ jobs:
       - name: publish formula to the tap
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
-          if [ -z "${TAP_TOKEN:-}" ]; then
-            echo "HOMEBREW_TAP_TOKEN is not set — skipping tap update."
-            echo "Copy build/dist/secret.rb into the tap and set the token to automate it."
+          if [ -z "${TAP_DEPLOY_KEY:-}" ]; then
+            echo "HOMEBREW_TAP_DEPLOY_KEY is not set — skipping tap update."
+            echo "Add a write deploy key for astahmer/homebrew-tap as that secret to automate it."
             exit 0
           fi
-          curl -sSfL -o /tmp/secret.rb "https://raw.githubusercontent.com/astahmer/homebrew-tap/main/Formula/secret.rb" || true
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/astahmer/homebrew-tap.git" /tmp/tap
+          # A write-scoped deploy key can push only to its own repository, so a
+          # leak of this secret cannot reach anything else. It replaces the
+          # personal token the workflow used before.
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/tap_deploy
+          chmod 600 ~/.ssh/tap_deploy
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tap_deploy -o IdentitiesOnly=yes" \
+            git clone --depth 1 git@github.com:astahmer/homebrew-tap.git /tmp/tap
           mkdir -p /tmp/tap/Formula
           cp build/dist/secret.rb /tmp/tap/Formula/secret.rb
           cd /tmp/tap
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "secret ${GITHUB_REF_NAME}" || echo "formula unchanged"
-          git push origin HEAD:main
+          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tap_deploy -o IdentitiesOnly=yes" git push origin HEAD:main
+          rm -f ~/.ssh/tap_deploy
