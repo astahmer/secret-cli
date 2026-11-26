@@ -254,6 +254,7 @@ func mcpToolsList() -> J {
                 ("type", .str("object")),
                 ("properties", .obj([
                     ("alias", .obj([("type", .str("string")), ("description", .str("Alias to check."))])),
+                    ("cwd", .obj([("type", .str("string")), ("description", .str("Folder whose project/local config counts (default: server cwd)."))])),
                     ("env", .obj([("type", .str("string")), ("description", .str("Environment name (default prod)."))])),
                     ("configPath", .obj([("type", .str("string")), ("description", .str("Path to a .secret.json instead of auto-detection."))])),
                 ])),
@@ -329,6 +330,16 @@ func mcpCallCheck(_ args: J?) async -> J {
         return mcpText("secret_check requires alias", isError: true)
     }
     let envName = mcpEnvironment(args)
+    let previousDirectory = FileManager.default.currentDirectoryPath
+    defer { _ = FileManager.default.changeCurrentDirectoryPath(previousDirectory) }
+    if let cwd = mcpArgString(args, "cwd") {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue,
+              FileManager.default.changeCurrentDirectoryPath(cwd)
+        else {
+            return mcpText("cwd is not a directory: \(cwd)", isError: true)
+        }
+    }
     guard let loaded = mcpLoad(configPath: mcpArgString(args, "configPath"), environment: envName) else {
         return mcpText("invalid or unreadable secret config", isError: true)
     }
@@ -351,7 +362,7 @@ func mcpCallCheck(_ args: J?) async -> J {
         ("expired", .bool(expired)),
         ("note", .str("Availability only; the value is not returned.")),
     ])
-    return mcpText(jStringify(payload, pretty: false), isError: !available)
+    return mcpText(jStringify(payload, pretty: false))
 }
 
 func mcpCallStatus() async -> J {
