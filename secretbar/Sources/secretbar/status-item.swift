@@ -12,12 +12,17 @@ final class SecretBarStatusItemController: NSObject, NSWindowDelegate {
     private var panel: KeyablePanel?
     private var stateCancellable: AnyCancellable?
     private var rightClickMonitor: Any?
+    private var outsideClickMonitor: Any?
+    private var localClickMonitor: Any?
     private weak var model: SecretBarModel?
 
     private let panelSize = NSSize(width: 620, height: 700)
 
     func start(model: SecretBarModel) {
         self.model = model
+        // Starting twice would add a second status item and a second panel,
+        // which reads as two SecretBars.
+        guard statusItem == nil else { return }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem = item
@@ -78,14 +83,45 @@ final class SecretBarStatusItemController: NSObject, NSWindowDelegate {
 
     func showPanel() {
         guard let model else { return }
+        if let panel, panel.isVisible { return }
         let targetPanel = ensurePanel(model: model)
         positionPanel(targetPanel)
         targetPanel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        installClickMonitors()
     }
 
     func hidePanel() {
+        removeClickMonitors()
         panel?.orderOut(nil)
+    }
+
+    // A nonactivating, status-bar-level panel does not reliably resign key when
+    // another app is clicked, so the popover stayed open. Watch the mouse
+    // instead: the global monitor sees other apps, the local one sees clicks
+    // inside ours.
+    private func installClickMonitors() {
+        removeClickMonitors()
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor in self?.hidePanel() }
+        }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.panel, panel.isVisible else { return event }
+                if event.window === panel { return event }
+                // A click on the status item toggles the panel in its own action.
+                if event.window === self.statusItem?.button?.window { return event }
+                self.hidePanel()
+                return event
+            }
+        }
+    }
+
+    private func removeClickMonitors() {
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        if let localClickMonitor { NSEvent.removeMonitor(localClickMonitor) }
+        outsideClickMonitor = nil
+        localClickMonitor = nil
     }
 
     private func ensurePanel(model: SecretBarModel) -> KeyablePanel {
@@ -102,7 +138,9 @@ final class SecretBarStatusItemController: NSObject, NSWindowDelegate {
         newPanel.isMovableByWindowBackground = false
         newPanel.level = .statusBar
         newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        newPanel.hidesOnDeactivate = false
+        // Switching to another app should dismiss the popover, like a menu.
+        newPanel.hidesOnDeactivate = true
+        newPanel.onCancel = { [weak self] in self?.hidePanel() }
         newPanel.contentView = NSHostingView(rootView: SecretBarView().environmentObject(model))
         newPanel.delegate = self
         panel = newPanel
@@ -193,5 +231,12 @@ final class SecretBarStatusItemController: NSObject, NSWindowDelegate {
 /// Borderless panels cannot become key by default; the search field and
 /// sheets inside SecretBarView need key focus.
 final class KeyablePanel: NSPanel {
+    /// Escape closes the popover even when no control claims the key.
+    var onCancel: (() -> Void)?
+
     override var canBecomeKey: Bool { true }
+
+    override func cancelOperation(_ sender: Any?) {
+        onCancel?()
+    }
 }

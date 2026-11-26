@@ -48,6 +48,8 @@ struct Options {
     var caller: String?
     var reason: String?
     var aliases: [String] = []
+    var item: String?
+    var expect: String?
     var kind: String?
     var length: Int?
     var words: Int?
@@ -187,6 +189,14 @@ func parseOptions(_ argv: [String]) -> Options {
             index += 1
             guard index < argv.count else { fail("--reason requires text") }
             options.reason = argv[index]
+        } else if argument == "--expect" {
+            index += 1
+            guard index < argv.count else { fail("--expect requires a rule (port, url, enum:a,b, string(startsWith=...))") }
+            options.expect = argv[index]
+        } else if argument == "--item" {
+            index += 1
+            guard index < argv.count else { fail("--item requires a vault item name") }
+            options.item = argv[index]
         } else if argument == "--kind" || argument == "--type-of" {
             index += 1
             guard index < argv.count else { fail("--kind requires a value (password, token, hex, base64, uuid, passphrase)") }
@@ -479,6 +489,18 @@ let commandHelpText: [String: String] = [
 
     Audit records use the caller 'mcp' and command 'mcp:<tool>'.
     """,
+    "adopt": """
+    Usage: secret adopt <alias> [--item NAME] [--field FIELD] [--global] [--config FILE] [--env NAME] [--expect RULE]
+
+    Declare an alias for a vault item that already exists, without prompting
+    for or overwriting its value. Defaults to the item `global/<alias>` for
+    --global and `<folder>/<alias>` for a project config.
+
+      --item NAME   Point at a different vault item
+      --field       Which field to read (default password)
+      --global      Write the global config instead of the project one
+      --expect      Record a value rule (see 'secret generate --help' context)
+    """,
     "version": """
     Usage: secret version
 
@@ -557,6 +579,7 @@ func printHelp() {
       global              Show the global (user) scope aliases
       prune [--dry-run]   Remove config aliases whose vault items no longer exist
       unaliased [--json]  Vault items under global/ with no alias; get still resolves them by name
+      adopt <alias>       Declare an existing vault item as an alias without re-entering its value
       lint                Validate configs offline: items, env keys, collisions (no vault)
       doctor (d)          Validate configs, Bitwarden state, and alias resolvability
       recent              Show recently used aliases
@@ -1315,7 +1338,7 @@ func run() async {
     let vaultTouchingCommands: Set<String> = [
         "get", "set", "edit", "id", "totp", "source", "pin", "rotate",
         "rm", "unset", "mv", "env", "run", "doctor", "pull", "list", "unaliased", "scan",
-        "git-credential", "docker-credential",
+        "git-credential", "docker-credential", "adopt",
     ]
     if vaultTouchingCommands.contains(options.command) {
         maybeBootstrapBiometricSession()
@@ -1472,6 +1495,40 @@ func run() async {
         // post-lock commands re-unlock through a fresh biometric prompt;
         // if bw invalidated it, the bootstrap stale-check removes it.
         writeErr(hadSession ? "secret: vault locked; stored session cleared\n" : "secret: vault locked\n")
+
+    case "adopt":
+        guard let alias = options.positional.first else {
+            fail("adopt requires an alias, e.g. secret adopt najar-mcp-inspector-openai-key --global")
+        }
+        guard validAlias(alias) else { fail(invalidAliasMessage(alias)) }
+        if loaded.definitions[alias] != nil { fail("alias \(alias) is already declared (see 'secret list')") }
+        let envName = options.envName ?? "prod"
+        let filePath = options.global
+            ? userConfigPath
+            : (options.configPath ?? findProjectConfig() ?? "\(FileManager.default.currentDirectoryPath)/\(projectConfigName)")
+        let itemName = options.item ?? (options.global
+            ? "\(globalItemPrefix)/\(kebab(alias))"
+            : "\(URL(fileURLWithPath: filePath).deletingLastPathComponent().lastPathComponent)/\(kebab(alias))")
+        let field = options.field ?? "password"
+        let items = await vaultBackend.items()
+        guard itemFor(items, itemName) != nil else {
+            await vaultBackend.requireUnlocked()
+            if let items {
+                warn("hint: the vault holds \(items.count) item(s); pass --item <name> to point at one of them")
+            }
+            fail("no vault item named \(itemName)")
+        }
+        var pairs: [(String, J)] = [
+            ("item", .str(itemName)),
+            ("field", .str(field)),
+            ("env", .str(scream(alias))),
+        ]
+        if let expect = options.expect { pairs.append(("expect", .str(expect))) }
+        if let source = options.source { pairs.append(("source", .str(source))) }
+        let updated = addDefinitionToConfig(exists(filePath) ? readConfig(filePath) : nil, alias: alias, definition: .obj(pairs), environment: envName)
+        writeAtomic(filePath, jStringify(updated) + "\n")
+        recordHistory(entry: HistoryEntry(at: isoNow(), cmd: "adopt", target: alias, env: envName))
+        success("declared \(alias) → \(itemName) in \(filePath)")
 
     case "unaliased":
         let rows = await unaliasedGlobalItems()

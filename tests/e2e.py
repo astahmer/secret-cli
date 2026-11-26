@@ -73,7 +73,7 @@ def main():
     run(["set", "E2E_OTHER", "--force"], "synthetic-other-value-zzz999\n")
 
     out = run(["version"]).stdout.strip()
-    check("version", out == "secret 2.3.1", out)
+    check("version", out == "secret 2.4.0", out)
 
     result = run(["get", "E2E_TOKEN"])
     check("get", result.stdout.strip() == "synthetic-e2e-value-abc123", result.stderr)
@@ -140,7 +140,7 @@ def main():
     def text_of(reply_id):
         return replies[reply_id]["result"]["content"][0]["text"]
 
-    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.3.1")
+    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.4.0")
     names = [tool["name"] for tool in replies[2]["result"]["tools"]]
     check("mcp tools/list", set(names) == {"secret_list", "secret_check", "secret_status", "secret_run"}, names)
     listing = json.loads(text_of(3))
@@ -186,6 +186,21 @@ def main():
         }}, handle)
     mixed = run(["env", "--export"], extra=op_env)
     check("per-alias backend mix resolves both", "OP_KEY=" in mixed.stdout and "E2E_TOKEN=" in mixed.stdout, mixed.stderr)
+
+    # --- adopt: declare an existing vault item without re-entering its value
+    with open(os.path.join(proj, ".secret.json"), "w") as handle:
+        json.dump({"secrets": {}}, handle)
+    with open(env["BW_FAKE_STATE"], "w") as handle:
+        json.dump({"items": [{"id": "u1", "name": "global/orphan-token", "login": {"password": "orphan-value"}}], "next": 2}, handle)
+    unaliased = run(["unaliased", "--json"])
+    check("unaliased lists the orphan", json.loads(unaliased.stdout)[0]["alias"] == "orphan-token", unaliased.stdout)
+    adopted = run(["adopt", "orphan-token", "--global", "--expect", "nonempty"])
+    check("adopt declares the alias", adopted.returncode == 0, adopted.stderr)
+    check("adopt writes the item", "global/orphan-token" in open(os.path.join(work, "config", "config.json")).read())
+    check("adopt keeps the value readable", run(["get", "orphan-token"]).stdout.strip() == "orphan-value")
+    check("adopt removes it from unaliased", json.loads(run(["unaliased", "--json"]).stdout) == [])
+    check("adopt refuses a duplicate", run(["adopt", "orphan-token", "--global"]).returncode != 0)
+    check("adopt refuses an unknown item", run(["adopt", "ghost", "--global"]).returncode != 0)
 
     # --- generate kinds
     for kind, pattern in (("password", r"[!-~]{40}"), ("token", r"[A-Za-z0-9]{40}"), ("hex", r"[0-9a-f]{40}"), ("uuid", r"[0-9a-f-]{36}")):

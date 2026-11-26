@@ -219,9 +219,30 @@ struct AliasEntry: Identifiable, Hashable {
     let envKey: String
     let tags: [String]
     let expiresAt: String?
+    let backend: String?
+    let expect: String?
 
     var id: String { "\(project):\(environment):\(alias)" }
+    /// Shown next to the item when this alias leaves the default backend.
+    var backendTitle: String? {
+        guard let backend, backend != "bitwarden" else { return nil }
+        return backend == "1password" || backend == "op" ? "1Password" : backend
+    }
+    var badgeTitle: String? {
+        [backendTitle, expect].compactMap { $0 }.first
+    }
     var itemTypeTitle: String { itemType == SecretItemType.secureNote.rawValue ? "Secure Note" : "Login" }
+}
+
+/// A vault item the CLI resolves by name (`global/<alias>`) but no config
+/// declares. Adopting it writes the config entry, so it appears in the list and
+/// gains `doctor` coverage without re-entering the value.
+struct UnaliasedEntry: Identifiable, Hashable {
+    let alias: String
+    let item: String
+    let field: String
+
+    var id: String { "vault:\(alias)" }
 }
 
 struct ImportCandidate: Identifiable {
@@ -327,6 +348,7 @@ final class SecretBarModel: ObservableObject {
     @Published var biometricCacheAvailable = false
     @Published var remoteValidationComplete = false
     @Published var revealingID: String?
+    @Published var unaliased: [UnaliasedEntry] = []
     @Published var revealedValue = ""
     @Published var remoteValidationInProgress = false
     @Published var healthCheckStatus: String?
@@ -372,6 +394,28 @@ final class SecretBarModel: ObservableObject {
     private var clipboardTask: Task<Void, Never>?
     private var lastUsedByKey: [String: String] = [:]
 
+    /// The config's top-level `backend`, which every alias without its own
+    /// override uses.
+    nonisolated private static func readDefaultBackend() -> String {
+        let path = "\(homeDirectory())/.config/secret/config.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let backend = json["backend"] as? String, !backend.isEmpty
+        else { return "bitwarden" }
+        return backend
+    }
+
+    nonisolated private static func readUnaliased(_ result: RunResult) -> [UnaliasedEntry] {
+        guard result.status == 0,
+              let data = result.stdout.data(using: .utf8),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        return rows.compactMap { row in
+            guard let alias = row["alias"] as? String, !alias.isEmpty, let item = row["item"] as? String else { return nil }
+            return UnaliasedEntry(alias: alias, item: item, field: row["field"] as? String ?? "password")
+        }
+    }
+
     private static func preferenceBool(_ key: String, defaultValue: Bool) -> Bool {
         guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
         return UserDefaults.standard.bool(forKey: key)
@@ -407,11 +451,13 @@ final class SecretBarModel: ObservableObject {
                 // missing.
                 _ = runSecret(["pull"], timeout: 90)
             }
+            let vaultOnly = newState == .unlocked ? Self.readUnaliased(runSecret(["unaliased", "--json"], timeout: 30)) : []
             let sessionAge = Self.readSessionAge()
             let cacheAvailable = FileManager.default.fileExists(atPath: homeDirectory() + "/.config/secret/biometric-session")
             await MainActor.run {
                 self.state = newState
                 self.biometricCacheAvailable = cacheAvailable
+                self.unaliased = vaultOnly
                 self.refreshIndex()
                 self.refreshHistory()
                 self.sessionCreated = sessionAge
@@ -533,6 +579,7 @@ final class SecretBarModel: ObservableObject {
         projects = found
 
         var indexed: [AliasEntry] = []
+        let defaultBackend = Self.readDefaultBackend()
         for project in found {
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: project.configPath)),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -572,7 +619,9 @@ final class SecretBarModel: ObservableObject {
                     itemType: definition["type"] as? String ?? "login",
                     envKey: definition["env"] as? String ?? alias,
                     tags: definition["tags"] as? [String] ?? baseTags[alias] ?? [],
-                    expiresAt: definition["expiresAt"] as? String
+                    expiresAt: definition["expiresAt"] as? String,
+                    backend: definition["backend"] as? String ?? defaultBackend,
+                    expect: definition["expect"] as? String
                 ))
             }
         }
@@ -744,6 +793,56 @@ final class SecretBarModel: ObservableObject {
     nonisolated static func parseProblems(_ text: String) -> Int {
         guard let match = text.range(of: #"[0-9]+ problem\(s\)"#, options: .regularExpression) else { return 0 }
         return Int(text[match].filter(\.isNumber)) ?? 0
+    }
+
+    /// Copy an undeclared global item: the CLI resolves it by name, so no
+    /// config entry is needed for a read.
+    func copyUnaliased(_ entry: UnaliasedEntry) {
+        setBusy(true)
+        let alias = entry.alias
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = runSecret(["get", "--copy", alias], timeout: 60, allowBiometrics: true)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.setBusy(false)
+                guard result.status == 0 else {
+                    self.showError(title: "Could not copy \(alias)", message: Self.detailText(result, fallback: "secret get failed"))
+                    return
+                }
+                self.flash("copied \(alias)")
+                self.scheduleClipboardClear()
+            }
+        }
+    }
+
+    /// Declare the alias without re-entering the value (`secret adopt`).
+    func adopt(_ entry: UnaliasedEntry, completion: @escaping @MainActor (Bool) -> Void = { _ in }) {
+        setBusy(true)
+        let alias = entry.alias
+        let arguments = ["adopt", alias, "--global", "--item", entry.item, "--field", entry.field]
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = runSecret(arguments, timeout: 60, allowBiometrics: true)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.setBusy(false)
+                guard result.status == 0 else {
+                    self.showError(title: "Could not declare \(alias)", message: Self.detailText(result, fallback: "secret adopt failed"))
+                    completion(false)
+                    return
+                }
+                self.flash("declared \(alias)")
+                self.refreshEverything()
+                completion(true)
+            }
+        }
+    }
+
+    /// One generated value from the CLI's CSPRNG (no vault round-trip).
+    func generatedValue(kind: String = "password", length: Int = 32) -> String? {
+        let result = runSecret(["generate", "--kind", kind, "--length", String(length)])
+        guard result.status == 0 else { return nil }
+        let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     func copy(_ entry: AliasEntry) {
@@ -1892,6 +1991,15 @@ struct SecretBarView: View {
         }
     }
 
+    /// Undeclared vault items. They belong to the machine, not a project, so
+    /// they only appear while the global scope is selected.
+    private var visibleUnaliased: [UnaliasedEntry] {
+        guard selectedProject?.isGlobal == true else { return [] }
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return model.unaliased }
+        return model.unaliased.filter { $0.alias.lowercased().contains(needle) || $0.item.lowercased().contains(needle) }
+    }
+
     private var availableTags: [String] {
         Array(Set(model.entries.flatMap(\.tags))).sorted()
     }
@@ -2257,8 +2365,18 @@ struct SecretBarView: View {
                                 }
                         } else {
                             LabeledContent("Value") {
-                                SecureField("Required", text: $createValue)
-                                    .textFieldStyle(.roundedBorder)
+                                HStack(spacing: 6) {
+                                    SecureField("Required", text: $createValue)
+                                        .textFieldStyle(.roundedBorder)
+                                    Button {
+                                        if let generated = model.generatedValue() { createValue = generated }
+                                    } label: {
+                                        Image(systemName: "die.face.5")
+                                            .accessibilityLabel("Generate a password")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .help("Generate a 32-character password")
+                                }
                             }
                             TextEditor(text: $createNotes)
                                 .font(.body)
@@ -2409,6 +2527,9 @@ struct SecretBarView: View {
                     } else {
                         ForEach(sortedEntries) { entry in
                             entryCard(entry)
+                        }
+                        if !visibleUnaliased.isEmpty {
+                            unaliasedSection
                         }
                     }
                 }
@@ -2717,6 +2838,65 @@ struct SecretBarView: View {
         Text(title).font(.caption2).foregroundStyle(.secondary)
     }
 
+    private var unaliasedSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Divider().padding(.vertical, 6)
+            HStack(spacing: 6) {
+                Image(systemName: "shippingbox")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text("In the vault, not declared")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("claim one to give it an env key and health checks")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 4)
+            ForEach(visibleUnaliased) { entry in
+                unaliasedRow(entry)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func unaliasedRow(_ entry: UnaliasedEntry) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "key.horizontal")
+                .font(.body.weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.alias)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+                Text(entry.item)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Copy") { model.copyUnaliased(entry) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.busy)
+                .accessibilityLabel("Copy \(entry.alias)")
+            Button("Declare") { model.adopt(entry) }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(model.busy)
+                .help("Add this item to the global config as an alias")
+                .accessibilityLabel("Declare \(entry.alias) as an alias")
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+    }
+
     private func entryCard(_ entry: AliasEntry) -> some View {
         let isSecureNote = entry.itemType == SecretItemType.secureNote.rawValue
         let health = model.health(for: entry)
@@ -2749,6 +2929,16 @@ struct SecretBarView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             .accessibilityLabel("Pinned")
+                        }
+                        if let badge = entry.badgeTitle {
+                            Text(badge)
+                                .font(.system(size: 9, weight: .semibold))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.primary.opacity(0.08), in: Capsule())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .help(entry.backendTitle != nil ? "Stored in \(entry.backendTitle ?? "")" : "Value must match: \(entry.expect ?? "")")
                         }
                     }
                     if model.revealingID == entry.id {
@@ -2927,6 +3117,16 @@ final class SecretBarAppDelegate: NSObject, NSApplicationDelegate {
     let statusItemController = SecretBarStatusItemController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // `open`, LaunchServices and an update that changed the bundle path can
+        // all start a second process, and two processes mean two status items
+        // and two popovers. The first instance wins; the newcomer bows out.
+        if let bundleIdentifier = Bundle.main.bundleIdentifier,
+           let sibling = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+               .first(where: { $0 != NSRunningApplication.current && !$0.isTerminated }) {
+            sibling.activate(options: [.activateIgnoringOtherApps])
+            NSApp.terminate(nil)
+            return
+        }
         SecretBarModel.shared.start()
         let showInMenuBar = UserDefaults.standard.object(forKey: "secretbar.showInMenuBar") == nil
             ? true

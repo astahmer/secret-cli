@@ -25,7 +25,7 @@ Nix users get it from [nixfiles](https://github.com/astahmer/nixfiles), which pa
 ## Components
 
 - `secret/` — CLI for scoped alias lookup, vault operations, project environment injection, session management, health checks, leak scanning, an audit trail and an MCP server for agents. Backends: Bitwarden, 1Password and the macOS Keychain, selectable per alias.
-- `secretbar/` — SecretBar.app, a macOS interface for searching configured aliases, copying values, unlocking, and reviewing vault health. It invokes the `secret` executable.
+- `secretbar/` — SecretBar.app, a macOS interface for searching configured aliases, copying values, unlocking, and reviewing vault health. It invokes the `secret` executable. It also lists vault items no alias declares yet and can `adopt` one in place, and shows a badge for an alias's backend override or value rule.
 
 The clients work with configured aliases. They do not enumerate an entire vault as an implicit discovery mechanism. Values stay in the selected backend unless a user action returns or copies one.
 
@@ -51,6 +51,21 @@ reference and read through `op read`, so `op signin`, a service account
 reference never create a duplicate. `SECRET_ONEPASSWORD_VAULT` sets the vault
 name for configs that name a bare item, and `SECRET_BACKEND` forces one backend
 for a single invocation.
+
+## Declaring an item you already have
+
+`secret unaliased` lists vault items under `global/` that no alias declares;
+`get` still resolves them by name. `secret adopt` writes the config entry
+without asking for the value again:
+
+```sh
+secret unaliased --json
+secret adopt my-existing-token --global --expect nonempty
+```
+
+`--item` points at a different item, `--field` picks the field, and `--expect`
+records a value rule in the same step. SecretBar shows these items under "In
+the vault, not declared" in the global scope with Copy and Declare buttons.
 
 ## Generation, credential helpers and typed values
 
