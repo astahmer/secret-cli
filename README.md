@@ -24,10 +24,33 @@ Nix users get it from [nixfiles](https://github.com/astahmer/nixfiles), which pa
 
 ## Components
 
-- `secret/` — CLI for scoped alias lookup, vault operations, project environment injection, session management, health checks, leak scanning, an audit trail and an MCP server for agents. It supports Bitwarden and the macOS Keychain backend.
+- `secret/` — CLI for scoped alias lookup, vault operations, project environment injection, session management, health checks, leak scanning, an audit trail and an MCP server for agents. Backends: Bitwarden, 1Password and the macOS Keychain, selectable per alias.
 - `secretbar/` — SecretBar.app, a macOS interface for searching configured aliases, copying values, unlocking, and reviewing vault health. It invokes the `secret` executable.
 
 The clients work with configured aliases. They do not enumerate an entire vault as an implicit discovery mechanism. Values stay in the selected backend unless a user action returns or copies one.
+
+## Backends, including per alias
+
+`backend` in the global config picks the default (`bitwarden`, `1password`,
+`keychain`), and an alias may override it, so one config mixes providers:
+
+```json
+{
+  "secrets": {
+    "STRIPE_KEY": { "item": "op://Personal/Stripe/api_key", "field": "custom:api_key", "env": "STRIPE_KEY", "backend": "1password" },
+    "DATABASE_URL": { "item": "app/db", "field": "password", "env": "DATABASE_URL" },
+    "LOCAL_TOKEN": { "item": "local-token", "field": "password", "env": "LOCAL_TOKEN", "backend": "keychain" }
+  }
+}
+```
+
+1Password items are addressed with the normal `op://vault/item/field`
+reference and read through `op read`, so `op signin`, a service account
+(`OP_SERVICE_ACCOUNT_TOKEN`) or the desktop app's Touch ID all work unchanged.
+`secret set` on such an alias edits that item (`op item edit`); writes to a
+reference never create a duplicate. `SECRET_ONEPASSWORD_VAULT` sets the vault
+name for configs that name a bare item, and `SECRET_BACKEND` forces one backend
+for a single invocation.
 
 ## Giving secrets to an agent
 

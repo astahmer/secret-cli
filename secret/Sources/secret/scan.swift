@@ -30,7 +30,7 @@ func scanNeedles(_ loaded: LoadedConfig, _ onlyAliases: [String]) async -> [(ali
             }
             continue
         }
-        guard let value = resolveOptional(items, definition),
+        guard let value = await resolveOptional(items, definition),
               value.count >= scanMinValueLength,
               value != "true", value != "false"
         else { continue }

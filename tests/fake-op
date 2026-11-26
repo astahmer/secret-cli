@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+import json, sys
+import os as _os
+state_path = _os.environ.get("OP_FAKE_STATE", "/tmp/op-fake-state.json")
+try:
+    store = json.load(open(state_path))
+except FileNotFoundError:
+    store = {"items": {}, "next": 1}
+def save():
+    json.dump(store, open(state_path, "w"))
+args = sys.argv[1:]
+if not args:
+    sys.exit(1)
+cmd = args[0]
+def item_payload(item):
+    fields = [{"label": "username", "value": item.get("username", ""), "section": {"label": ""}},
+              {"label": "password", "value": item.get("password", ""), "section": {"label": ""}},
+              {"label": "notesPlain", "value": item.get("notes", ""), "section": {"label": ""}}]
+    for name, value in item.get("custom", {}).items():
+        fields.append({"label": name, "value": value, "section": {"label": ""}})
+    return {"id": item["id"], "title": item["title"], "created_at": item.get("created_at", "2026-01-01T00:00:00Z"), "vault": {"name": item.get("vault", "Private")}, "fields": fields}
+if cmd == "vault" and args[1:2] == ["list"]:
+    print(json.dumps([{"id": "v1", "name": store.get("vault", "Private")}]))
+elif cmd == "item" and args[1:2] == ["list"]:
+    print(json.dumps([{"id": i["id"], "title": i["title"]} for i in store["items"].values()]))
+elif cmd == "read":
+    ref = args[1]
+    parts = [p for p in ref.split("/") if p]
+    title, field = parts[2], parts[3]
+    for item in store["items"].values():
+        if item["title"] == title:
+            value = item.get(field) or item.get("custom", {}).get(field) or ""
+            print(value)
+            sys.exit(0)
+    sys.stderr.write("item not found\n"); sys.exit(1)
+elif cmd == "item" and args[1:2] == ["get"]:
+    ref = args[2].split("/")
+    ref = [p for p in ref if p]
+    title = ref[2] if ref[:1] == ["op:"] else args[2]
+    for item in store["items"].values():
+        if args[2] in (item["id"], item["title"]) or item["title"] == title:
+            print(json.dumps(item_payload(item)) if "--otp" not in args else "123456")
+            sys.exit(0)
+    sys.stderr.write("item not found\n"); sys.exit(1)
+elif cmd == "item" and args[1:2] == ["create"]:
+    def flag(name):
+        for index, arg in enumerate(args):
+            if arg.startswith(name + "="): return arg.split("=", 1)[1]
+            if arg == name: return args[index + 1]
+        return ""
+    title = flag("--title")
+    ident = "id-%d" % store["next"]; store["next"] += 1
+    password = flag("--password")
+    store["items"][ident] = {"id": ident, "title": title, "password": password}
+    save(); print(json.dumps(item_payload(store["items"][ident])))
+elif cmd == "item" and args[1:2] == ["edit"]:
+    ident = args[2]
+    store.setdefault("items", {})
+    item = next((i for i in store["items"].values() if ident in (i["id"], i["title"])), None)
+    if item is None:
+        sys.stderr.write("item not found\n"); sys.exit(1)
+    for arg in args[3:]:
+        if "=" not in arg: continue
+        key, value = arg.split("=", 1)
+        if key == "password": item["password"] = value
+        elif key == "username": item["username"] = value
+        elif key == "notesPlain": item["notes"] = value
+        elif key.endswith("[text]"): item.setdefault("custom", {})[key[:-6]] = value
+    save(); print(json.dumps(item_payload(item)))
+elif cmd == "item" and args[1:2] == ["delete"]:
+    store["items"].pop(args[2], None); save()
+elif cmd == "signout":
+    sys.exit(0)
+else:
+    sys.stderr.write("fake op: unsupported %s\n" % " ".join(args)); sys.exit(1)

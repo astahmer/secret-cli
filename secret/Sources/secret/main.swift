@@ -859,22 +859,20 @@ func parseExpiry(_ value: String) -> Date? {
 }
 
 func resolveRequired(_ items: [JSON]?, _ alias: String, _ definition: SecretDefinition) async -> String {
-    if items == nil {
-        await vaultBackend.requireUnlocked()
-        fail("could not read vault items (bw list items failed)")
+    let backend = backend(for: definition)
+    await backend.requireUnlocked()
+    let cached = backend.id == vaultBackend.id ? items : nil
+    if let value = await backend.value(for: definition, items: cached) { return value }
+    if items?.isEmpty == true {
+        warn("hint: the vault is empty — create items with 'secret set <alias>', or check the account/server in bw config")
     }
-    guard let item = itemFor(items, definition.item) else {
-        if items?.isEmpty == true {
-            warn("hint: the vault is empty — create items with 'secret set <alias>', or check the account/server in bw config")
-        }
-        fail("item not found for \(alias): \(definition.item)")
-    }
-    guard let value = valueFor(item, definition) else { fail("missing or invalid value for \(alias)") }
-    return value
+    fail("missing or invalid value for \(alias): \(definition.item)")
 }
 
-func resolveOptional(_ items: [JSON]?, _ definition: SecretDefinition) -> String? {
-    valueFor(itemFor(items, definition.item), definition)
+func resolveOptional(_ items: [JSON]?, _ definition: SecretDefinition) async -> String? {
+    let backend = backend(for: definition)
+    let cached = backend.id == vaultBackend.id ? items : nil
+    return await backend.value(for: definition, items: cached)
 }
 
 // MARK: - Vault-as-registry fallback
@@ -944,9 +942,10 @@ func setValue(
     itemType: String? = nil,
     biometricConfirm: Bool = false
 ) async {
-    await vaultBackend.requireUnlocked()
+    let backend = backend(for: definition)
+    await backend.requireUnlocked()
     let field = definition.field ?? "password"
-    let items = await vaultBackend.items()
+    let items = await backend.items()
     let item = itemFor(items, definition.item)
     if item == nil {
         var payload = newItem(
@@ -957,7 +956,7 @@ func setValue(
         )
         if let notes, field != "notes" { setItemField(&payload, "notes", notes) }
         if let source { setItemField(&payload, "custom:source", source) }
-        await vaultBackend.createItem(payload)
+        await backend.createItem(payload)
         success("created item \(definition.item)")
         return
     }
@@ -976,7 +975,7 @@ func setValue(
     if let name { payload["name"] = name }
     if let notes { setItemField(&payload, "notes", notes) }
     if let source { setItemField(&payload, "custom:source", source) }
-    await vaultBackend.updateItem(id: id, payload)
+    await backend.updateItem(id: id, payload)
     success("updated item \(definition.item)")
 }
 
@@ -993,8 +992,9 @@ func editItem(
     guard value != nil || source != nil || name != nil || notes != nil else {
         fail("edit needs a field change (name, value, source, notes, or --field)")
     }
-    await vaultBackend.requireUnlocked()
-    let items = await vaultBackend.items()
+    let backend = backend(for: definition)
+    await backend.requireUnlocked()
+    let items = await backend.items()
     guard let item = itemFor(items, definition.item) else {
         fail("item not found for \(alias): \(definition.item)")
     }
@@ -1010,7 +1010,7 @@ func editItem(
     if let name { payload["name"] = name }
     if let source { setItemField(&payload, "custom:source", source) }
     if let notes { setItemField(&payload, "notes", notes) }
-    await vaultBackend.updateItem(id: id, payload)
+    await backend.updateItem(id: id, payload)
     success("edited \(alias)")
 }
 
@@ -1630,8 +1630,9 @@ func run() async {
             fail("totp requires an alias, e.g. secret totp github-token (see 'secret list')")
         }
         let definition = await definitionForRead(alias, loaded)
-        await vaultBackend.requireUnlocked()
-        let code = vaultBackend.totp(itemName: definition.item)
+        let backend = backend(for: definition)
+        await backend.requireUnlocked()
+        let code = backend.totp(itemName: definition.item)
         recordHistory(entry: HistoryEntry(at: isoNow(), cmd: "totp", target: alias, env: environment))
         if options.copy {
             copyToClipboardOrFail(code)
@@ -1828,9 +1829,11 @@ func run() async {
         }
         let items = await vaultBackend.items()
         if items != nil {
-            let missing = selected.filter { candidate in
-                guard let definition = loaded.definitions[candidate] else { return false }
-                return !optionalSet.contains(candidate) && resolveOptional(items, definition) == nil
+            var missing: [String] = []
+            for candidate in selected {
+                guard let definition = loaded.definitions[candidate] else { continue }
+                if optionalSet.contains(candidate) { continue }
+                if await resolveOptional(items, definition) == nil { missing.append(candidate) }
             }
             if !missing.isEmpty {
                 warn("hint: pass --optional \(missing.joined(separator: ",")) to skip unresolved aliases")
@@ -1841,11 +1844,11 @@ func run() async {
             guard let definition = loaded.definitions[alias] else { fail("unknown alias: \(alias)") }
             let key = dotenvKey(alias, definition)
             if optionalSet.contains(alias) {
-                guard let value = resolveOptional(items, definition) else {
+                guard let value = await resolveOptional(items, definition) else {
                     warn("skipping \(alias) (optional, unresolved)")
                     continue
                 }
-                if let source = resolveOptional(items, SecretDefinition(item: definition.item, field: "custom:source")) {
+                if let source = await resolveOptional(items, SecretDefinition(item: definition.item, field: "custom:source")) {
                     lines.append("# source: \(source)")
                 }
                 let formatted = dotenvValue(value)
@@ -1853,7 +1856,7 @@ func run() async {
                 continue
             }
             let value = dotenvValue(await resolveRequired(items, alias, definition))
-            if let source = resolveOptional(items, SecretDefinition(item: definition.item, field: "custom:source")) {
+            if let source = await resolveOptional(items, SecretDefinition(item: definition.item, field: "custom:source")) {
                 lines.append("# source: \(source)")
             }
             lines.append(options.export ? "export \(key)=\(value)" : "\(key)=\(value)")
@@ -1921,9 +1924,11 @@ func run() async {
         }
         let items = await vaultBackend.items()
         if items != nil {
-            let missing = selected.filter { candidate in
-                guard let definition = loaded.definitions[candidate] else { return false }
-                return !optionalSet.contains(candidate) && resolveOptional(items, definition) == nil
+            var missing: [String] = []
+            for candidate in selected {
+                guard let definition = loaded.definitions[candidate] else { continue }
+                if optionalSet.contains(candidate) { continue }
+                if await resolveOptional(items, definition) == nil { missing.append(candidate) }
             }
             if !missing.isEmpty {
                 warn("hint: pass --optional \(missing.joined(separator: ",")) to skip unresolved aliases")
@@ -1933,7 +1938,7 @@ func run() async {
             guard let definition = loaded.definitions[alias] else { fail("unknown alias: \(alias)") }
             let key = dotenvKey(alias, definition)
             if optionalSet.contains(alias) {
-                guard let value = resolveOptional(items, definition) else {
+                guard let value = await resolveOptional(items, definition) else {
                     warn("skipping \(alias) (optional, unresolved)")
                     continue
                 }

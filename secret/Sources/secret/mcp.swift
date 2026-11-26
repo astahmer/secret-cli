@@ -347,7 +347,7 @@ func mcpCallCheck(_ args: J?) async -> J {
         return mcpText("unknown alias: \(alias) (\(loaded.ordered.count) declared aliases; call secret_list)", isError: true)
     }
     let items = await mcpVaultItems()
-    let available = resolveOptional(items, definition) != nil
+    let available = await vaultBackend.value(for: definition, items: items) != nil
     var expired = false
     if let expiresAt = definition.expiresAt, let date = parseExpiry(expiresAt) {
         expired = date < Date()
@@ -418,7 +418,7 @@ func mcpCallRun(_ args: J?) async -> J {
     var unresolved: [String] = []
     for alias in selected {
         guard let definition = loaded.definitions[alias] else { continue }
-        guard let value = resolveOptional(items, definition) else {
+        guard let value = await vaultBackend.value(for: definition, items: items) else {
             unresolved.append(alias)
             continue
         }

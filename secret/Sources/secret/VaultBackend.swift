@@ -37,12 +37,28 @@ protocol VaultBackend {
     func syncCache() async
     /// Current one-time code for an item's TOTP seed.
     func totp(itemName: String) -> String
+    /// Read one configured value. `items` is an already-fetched item list the
+    /// caller cached, or nil. Backends that resolve references directly
+    /// (1Password's `op://` URIs) ignore it and read on demand.
+    func value(for definition: SecretDefinition, items: [JSON]?) async -> String?
 
     // MARK: Mutations (payloads are backend-shaped items)
 
     func createItem(_ payload: JSON) async
     func updateItem(id: String, _ payload: JSON) async
     func deleteItem(id: String, fallbackName: String) async
+}
+
+extension VaultBackend {
+    func value(for definition: SecretDefinition, items: [JSON]?) async -> String? {
+        let resolved: [JSON]?
+        if let items {
+            resolved = items
+        } else {
+            resolved = await self.items()
+        }
+        return valueFor(itemFor(resolved, definition.item), definition)
+    }
 }
 
 func runBwInput(_ args: [String], input: String) -> String {
@@ -137,7 +153,7 @@ struct BitwardenBackend: VaultBackend {
 
 // MARK: - Backend selection
 
-let availableBackends = ["bitwarden", "keychain"]
+let availableBackends = ["bitwarden", "keychain", "1password"]
 
 /// Selected once per invocation from the global config's top-level
 /// `"backend"` key; defaults to Bitwarden.
@@ -157,6 +173,7 @@ func activeBackend() -> VaultBackend {
     switch requested {
     case "bitwarden": return BitwardenBackend()
     case "keychain": return KeychainBackend()
+    case "1password", "op": return OnePasswordBackend()
     default:
         fail("unknown vault backend '\(requested)' (available: \(availableBackends.joined(separator: ", ")))")
     }
@@ -165,3 +182,18 @@ func activeBackend() -> VaultBackend {
 /// Process-wide backend instance; selection reads only a small local config
 /// so lazy initialization stays cheap for non-vault commands.
 let vaultBackend: VaultBackend = activeBackend()
+
+/// The backend one alias uses: its own `"backend"` key when set, else the
+/// process-wide one. Per-alias overrides are how a single config mixes
+/// providers (1Password for one API key, Bitwarden for the rest).
+func backend(for definition: SecretDefinition) -> VaultBackend {
+    guard let requested = definition.backend, !requested.isEmpty else { return vaultBackend }
+    guard requested != vaultBackend.id else { return vaultBackend }
+    switch requested {
+    case "bitwarden": return BitwardenBackend()
+    case "keychain": return KeychainBackend()
+    case "1password", "op": return OnePasswordBackend()
+    default:
+        fail("unknown backend '\(requested)' for this alias (available: \(availableBackends.joined(separator: ", ")))")
+    }
+}
