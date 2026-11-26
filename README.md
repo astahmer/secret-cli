@@ -20,7 +20,18 @@ curl -sSfL https://raw.githubusercontent.com/astahmer/secret-cli/main/install.sh
 It installs to `/usr/local/bin` when writable, else `~/.local/bin`; pin a version
 with `SECRET_VERSION=v2.1.1`, relocate with `SECRET_INSTALL_DIR`.
 
-Nix users get it from [nixfiles](https://github.com/astahmer/nixfiles), which packages the same source.
+Nix users can run it straight from this repository, no clone and no nixfiles:
+
+```sh
+nix run github:astahmer/secret-cli -- status
+nix profile install github:astahmer/secret-cli#secret   # CLI + man page
+nix profile install github:astahmer/secret-cli#secretbar # menu bar app (macOS)
+```
+
+`man secret` documents every command, option, environment variable and exit
+code; the same page ships in the release tarball and the Homebrew formula.
+[nixfiles](https://github.com/astahmer/nixfiles) still packages the same source
+for this machine.
 
 ## Components
 

@@ -67,6 +67,10 @@ cp "$SECRET_BIN" "$STAGE/$NAME/secret"
 chmod 755 "$STAGE/$NAME/secret"
 cp "$ROOT/LICENSE" "$STAGE/$NAME/LICENSE" 2>/dev/null || true
 cp "$ROOT/README.md" "$STAGE/$NAME/README.md" 2>/dev/null || true
+if [ -f "$ROOT/secret/secret.1" ]; then
+  mkdir -p "$STAGE/$NAME/share/man/man1"
+  cp "$ROOT/secret/secret.1" "$STAGE/$NAME/share/man/man1/secret.1"
+fi
 tar -czf "$DIST/$NAME.tar.gz" -C "$STAGE" "$NAME"
 rm -rf "$STAGE"
 
@@ -103,6 +107,7 @@ class Secret < Formula
 
   def install
     bin.install "secret-$VERSION-$LABEL/secret" => "secret"
+    man1.install "secret-$VERSION-$LABEL/share/man/man1/secret.1"
   end
 
   def caveats

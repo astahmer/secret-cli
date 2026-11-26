@@ -85,6 +85,16 @@ else
   exit 1
 fi
 
+# The man page ships beside the binary in the archive; install it when the
+# destination has a writable share/man next to its bin.
+manpage="$tmp/secret-$version-universal/share/man/man1/secret.1"
+if [ -f "$manpage" ]; then
+  man_dir="$(dirname "$dest")/share/man/man1"
+  if mkdir -p "$man_dir" 2>/dev/null && [ -w "$man_dir" ]; then
+    install -m 644 "$manpage" "$man_dir/secret.1" 2>/dev/null || true
+  fi
+fi
+
 printf 'secret install: %s/secret (%s)\n' "$dest" "$("$dest/secret" version)"
 case ":$PATH:" in
   *":$dest:"*) ;;
