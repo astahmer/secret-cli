@@ -1295,6 +1295,18 @@ final class SecretBarModel: ObservableObject {
     }
 
     func health(for entry: AliasEntry) -> String {
+        // The row's own doctor status is more precise than the project tally:
+        // it names a rule violation or a missing item instead of "Needs
+        // attention" for every alias in the same config.
+        if let status = remoteMetadata[entry.id]?.status, status != "ok" {
+            switch status {
+            case "mismatch": return "Rule not met"
+            case "expired": return "Expired"
+            case "missing": return "Missing item"
+            case "invalid": return "Empty value"
+            default: return "Needs attention"
+            }
+        }
         if let count = problems[entry.project], count > 0 { return "Needs attention" }
         if let expiresAt = entry.expiresAt,
            let expiry = parseDate(expiresAt) {

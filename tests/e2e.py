@@ -73,7 +73,7 @@ def main():
     run(["set", "E2E_OTHER", "--force"], "synthetic-other-value-zzz999\n")
 
     out = run(["version"]).stdout.strip()
-    check("version", out == "secret 2.5.0", out)
+    check("version", out == "secret 2.6.0", out)
 
     result = run(["get", "E2E_TOKEN"])
     check("get", result.stdout.strip() == "synthetic-e2e-value-abc123", result.stderr)
@@ -140,7 +140,7 @@ def main():
     def text_of(reply_id):
         return replies[reply_id]["result"]["content"][0]["text"]
 
-    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.5.0")
+    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.6.0")
     names = [tool["name"] for tool in replies[2]["result"]["tools"]]
     check("mcp tools/list", set(names) == {"secret_list", "secret_check", "secret_status", "secret_scan", "secret_run"}, names)
     listing = json.loads(text_of(3))
@@ -225,9 +225,37 @@ def main():
     check("edit --expect empty clears it", run(["edit", "FRESH", "--expect", ""]).returncode == 0 and '"expect"' not in open(os.path.join(proj, ".secret.json")).read())
     check("edit --backend writes the override", run(["edit", "FRESH", "--backend", "keychain"]).returncode == 0 and '"backend": "keychain"' in open(os.path.join(proj, ".secret.json")).read())
 
+    # --- doctor: per-backend, rule-aware, expiry-aware
+    with open(os.path.join(proj, ".secret.json"), "w") as handle:
+        json.dump({"secrets": {
+            "GOOD": {"item": "good", "field": "password", "env": "GOOD", "expect": "string(startsWith=ok-)"},
+            "BAD_RULE": {"item": "bad", "field": "password", "env": "BAD_RULE", "expect": "port"},
+            "STALE": {"item": "stale", "field": "password", "env": "STALE", "expiresAt": "2020-01-01"},
+            "OP_KEY": {"item": "op://Personal/OpenAI/api_key", "field": "custom:api_key", "env": "OP_KEY", "backend": "1password"},
+        }}, handle)
+    with open(env["BW_FAKE_STATE"], "w") as handle:
+        json.dump({"items": [
+            {"id": "g1", "name": "good", "login": {"password": "ok-value"}},
+            {"id": "b1", "name": "bad", "login": {"password": "not-a-port"}},
+            {"id": "s1", "name": "stale", "login": {"password": "stale-value"}},
+        ], "next": 5}, handle)
+    with open(op_state, "w") as handle:
+        json.dump({"items": {"id-1": {"id": "id-1", "title": "OpenAI", "vault": "Personal", "custom": {"api_key": "sk-op-value"}}}, "next": 2}, handle)
+    doctor = run(["doctor", "--json"], extra=op_env)
+    doctor_rows = {row["alias"]: row for row in json.loads(doctor.stdout)}
+    check("doctor resolves a 1password alias", doctor_rows["OP_KEY"]["status"] == "ok" and doctor_rows["OP_KEY"]["backend"] == "1password", doctor_rows.get("OP_KEY"))
+    check("doctor flags a rule violation", doctor_rows["BAD_RULE"]["status"] == "mismatch" and "port" in doctor_rows["BAD_RULE"]["detail"], doctor_rows.get("BAD_RULE"))
+    check("doctor flags an expired alias", doctor_rows["STALE"]["status"] == "expired")
+    check("doctor passes a matching rule", doctor_rows["GOOD"]["status"] == "ok")
+    check("doctor exits non-zero on problems", doctor.returncode != 0)
+    ci = run(["check"], extra=op_env)
+    check("check prints only problems", ci.returncode != 0 and "mismatch\tBAD_RULE" in (ci.stdout + ci.stderr), ci.stdout + ci.stderr)
+
     # --- mcp: secret_scan reports a leak without the value
     with open(os.path.join(proj, ".secret.json"), "w") as handle:
         json.dump({"secrets": {"FRESH": {"item": "fresh", "field": "password", "env": "FRESH"}}}, handle)
+    with open(env["BW_FAKE_STATE"], "w") as handle:
+        json.dump({"items": [{"id": "f9", "name": "fresh", "login": {"password": "fresh-value"}}], "next": 10}, handle)
     with open(os.path.join(proj, "leak.txt"), "w") as handle:
         handle.write("token=fresh-value\n")
     scan_messages = [

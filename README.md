@@ -52,6 +52,16 @@ reference never create a duplicate. `SECRET_ONEPASSWORD_VAULT` sets the vault
 name for configs that name a bare item, and `SECRET_BACKEND` forces one backend
 for a single invocation.
 
+## Health covers every backend
+
+`secret doctor` (and `secret check`, its non-interactive CI twin) resolves each
+alias **through its own backend**, so a config mixing Bitwarden, 1Password and
+the keychain reports the truth instead of calling half the list missing. Each
+row also carries `backend`, `expect` and a `detail` explaining a failure, and a
+value that breaks its rule reports `mismatch` with the rule that failed.
+SecretBar reads those rows, so a rule violation shows up on the alias row as
+"Rule not met".
+
 ## Expiry and value rules are enforced where it matters
 
 `secret env` and `secret run` refuse an alias whose `expiresAt` has passed

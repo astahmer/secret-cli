@@ -1187,10 +1187,21 @@ func doctor(_ definitions: [(alias: String, definition: SecretDefinition)], json
     var problems = 0
     if ci { setenv("SECRET_NO_PROMPT", "1", 1) }
     var jsonRows: [String] = []
-    let items = await vaultBackend.items()
-    if !json && !ci, let items {
+    // Each alias resolves through its own backend, so a Host mixing Bitwarden
+    // and 1Password reports the truth instead of "missing" for half the list.
+    var itemsByBackend: [String: [JSON]] = [:]
+    var fetchedBackends: Set<String> = []
+    func itemsOf(_ backend: VaultBackend) async -> [JSON]? {
+        if fetchedBackends.contains(backend.id) { return itemsByBackend[backend.id] ?? [] }
+        let fetched = await backend.items()
+        fetchedBackends.insert(backend.id)
+        if let fetched { itemsByBackend[backend.id] = fetched }
+        return fetched
+    }
+
+    if !json && !ci, let bitwardenItems = await itemsOf(vaultBackend) {
         let declared = Set(definitions.map { $0.definition.item })
-        let unaliased = items.compactMap { $0["name"] as? String }
+        let unaliased = bitwardenItems.compactMap { $0["name"] as? String }
             .filter { $0.hasPrefix("\(globalItemPrefix)/") && !declared.contains($0) }
             .sorted()
         if !unaliased.isEmpty {
@@ -1200,25 +1211,30 @@ func doctor(_ definitions: [(alias: String, definition: SecretDefinition)], json
     var expiringSoon: [String] = []
     for (alias, definition) in definitions {
         let field = definition.field ?? "password"
-        if let item = itemFor(items, definition.item) {
-            let value = itemField(item, field)
-            let valid = if let value = value as? String {
-                !value.isEmpty && !placeholderValues.contains(value)
-            } else {
-                false
+        let backend = backend(for: definition)
+        let items = await itemsOf(backend)
+        let item = itemFor(items, definition.item)
+        let value = await backend.value(for: definition, items: items)
+        if item != nil || value != nil {
+            var status = value == nil ? "invalid" : "ok"
+            var detail = ""
+            if let value, let rule = definition.type, !rule.isEmpty {
+                if let failure = typedRuleFailure(parseTypedRule(rule), value: value) {
+                    status = "mismatch"
+                    detail = failure
+                }
             }
-            var status = valid ? "ok" : "invalid"
-            if valid, let expiresText = definition.expiresAt, let expiry = parseExpiry(expiresText) {
+            if let expiresText = definition.expiresAt, let expiry = parseExpiry(expiresText) {
                 if expiry < Date() {
                     status = "expired"
-                    problems += 1
                 } else if expiry < Date().addingTimeInterval(14 * 86_400) {
                     expiringSoon.append(alias)
                 }
             }
-            let itemName = item["name"] as? String ?? definition.item
-            let source = itemField(item, "custom:source") as? String ?? ""
-            let hasTOTP = ((item["login"] as? JSON)?["totp"] as? String)?.isEmpty == false
+            if status != "ok" { problems += 1 }
+            let itemName = item?["name"] as? String ?? definition.item
+            let source = item.flatMap { itemField($0, "custom:source") as? String } ?? ""
+            let hasTOTP = ((item?["login"] as? JSON)?["totp"] as? String)?.isEmpty == false
             if json {
                 jsonRows.append(rowJSON([
                     ("alias", alias),
@@ -1228,14 +1244,17 @@ func doctor(_ definitions: [(alias: String, definition: SecretDefinition)], json
                     ("itemName", itemName),
                     ("source", source),
                     ("hasTOTP", hasTOTP ? "true" : "false"),
+                    ("backend", backend.id),
+                    ("expect", definition.type ?? ""),
+                    ("detail", detail),
                 ]))
             } else if status == "ok" {
                 if !ci { print("ok\t\(alias)\t\(definition.item)\t\(field)") }
             } else {
-                print("\(status) value\t\(alias)\t\(definition.item)\t\(field)")
-                if status == "invalid" { problems += 1 } // expired already counted
+                print("\(status)\t\(alias)\t\(definition.item)\t\(field)\(detail.isEmpty ? "" : "\t\(detail)")")
             }
         } else {
+            problems += 1
             if json {
                 jsonRows.append(rowJSON([
                     ("alias", alias),
@@ -1245,11 +1264,13 @@ func doctor(_ definitions: [(alias: String, definition: SecretDefinition)], json
                     ("itemName", ""),
                     ("source", ""),
                     ("hasTOTP", "false"),
+                    ("backend", backend.id),
+                    ("expect", definition.type ?? ""),
+                    ("detail", ""),
                 ]))
             } else {
                 print("missing\t\(alias)\t\(definition.item)")
             }
-            problems += 1
         }
     }
 
