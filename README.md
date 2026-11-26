@@ -52,6 +52,14 @@ reference never create a duplicate. `SECRET_ONEPASSWORD_VAULT` sets the vault
 name for configs that name a bare item, and `SECRET_BACKEND` forces one backend
 for a single invocation.
 
+## Expiry and value rules are enforced where it matters
+
+`secret env` and `secret run` refuse an alias whose `expiresAt` has passed
+(`--allow-expired` overrides) and one whose value breaks its `expect` rule, so
+a stale or malformed secret never reaches a child process. `secret edit
+<alias> --expect <rule>|--backend <name>` changes those declarations in place,
+and `secret generate` produces a value without touching the vault.
+
 ## Declaring an item you already have
 
 `secret unaliased` lists vault items under `global/` that no alias declares;

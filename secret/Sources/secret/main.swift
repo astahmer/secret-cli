@@ -50,6 +50,8 @@ struct Options {
     var aliases: [String] = []
     var item: String?
     var expect: String?
+    var backend: String?
+    var allowExpired = false
     var kind: String?
     var length: Int?
     var words: Int?
@@ -189,6 +191,12 @@ func parseOptions(_ argv: [String]) -> Options {
             index += 1
             guard index < argv.count else { fail("--reason requires text") }
             options.reason = argv[index]
+        } else if argument == "--backend" {
+            index += 1
+            guard index < argv.count else { fail("--backend requires bitwarden, 1password or keychain") }
+            options.backend = argv[index]
+        } else if argument == "--allow-expired" {
+            options.allowExpired = true
         } else if argument == "--expect" {
             index += 1
             guard index < argv.count else { fail("--expect requires a rule (port, url, enum:a,b, string(startsWith=...))") }
@@ -620,6 +628,9 @@ func printHelp() {
       --tags TAGS         With set/edit: record comma-separated local alias tags
       --value-stdin       With edit: read the new value from stdin without putting it in argv
       --open              With source: open the source URL in the browser
+      --backend NAME      With set/adopt/edit: bitwarden, 1password or keychain for this alias
+      --expect RULE       With edit/adopt: record a value rule (port, url, enum:a,b, string(startsWith=...))
+      --allow-expired     With env/run: inject an alias whose expiresAt has passed
       --global, -g        With set/unset/rm: operate on the global config
       --caller NAME       Record who is calling in the audit log (default: cli, or $SECRET_CALLER)
       --reason TEXT       Record why in the audit log (or $SECRET_REASON)
@@ -1524,6 +1535,7 @@ func run() async {
             ("env", .str(scream(alias))),
         ]
         if let expect = options.expect { pairs.append(("expect", .str(expect))) }
+        if let backend = options.backend { pairs.append(("backend", .str(backend))) }
         if let source = options.source { pairs.append(("source", .str(source))) }
         let updated = addDefinitionToConfig(exists(filePath) ? readConfig(filePath) : nil, alias: alias, definition: .obj(pairs), environment: envName)
         writeAtomic(filePath, jStringify(updated) + "\n")
@@ -1660,13 +1672,21 @@ func run() async {
             ]
             if let itemType = options.itemType { definitionPairs.append(("type", .str(itemType))) }
             if let expiresAt = options.expiresAt { definitionPairs.append(("expiresAt", .str(expiresAt))) }
+            if let backend = options.backend { definitionPairs.append(("backend", .str(backend))) }
             let tags = options.tags?.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } ?? []
             if !tags.isEmpty { definitionPairs.append(("tags", .arr(tags.map { .str($0) }))) }
             let newDefinition = J.obj(definitionPairs)
             let updated = addDefinitionToConfig(exists(filePath) ? readConfig(filePath) : nil, alias: aliasValue, definition: newDefinition, environment: environment)
             writeAtomic(filePath, jStringify(updated) + "\n")
             info("added \(aliasValue) (\(item)) to \(filePath)")
-            definition = SecretDefinition(item: item, field: newField, itemType: options.itemType, expiresAt: options.expiresAt, tags: tags)
+            definition = SecretDefinition(
+                item: item,
+                field: newField,
+                itemType: options.itemType,
+                expiresAt: options.expiresAt,
+                tags: tags,
+                backend: options.backend
+            )
         }
         let value = options.generate
             ? await generatePassword()
@@ -1721,7 +1741,8 @@ func run() async {
         var notes = options.notes
         var tags = options.tags
         let hasItemChange = field != nil || name != nil || source != nil || notes != nil
-        let hasExplicitChange = hasItemChange || tags != nil
+        let metadataChange = options.expect != nil || options.backend != nil
+        let hasExplicitChange = hasItemChange || tags != nil || metadataChange
         if !hasExplicitChange {
             if isatty(0) != 1 { fail("edit needs a field (use --name, --field, --source, --notes, or --tags)") }
             let choice = promptLine("Edit (name/value/source/notes/tags/custom:field)")
@@ -1755,6 +1776,23 @@ func run() async {
                 notes: notes,
                 force: options.force
             )
+        }
+        if metadataChange {
+            guard let owner = configWithAlias(
+                aliasValue,
+                projectPath: options.configPath ?? findProjectConfig(),
+                localPath: findProjectLocalConfig()
+            ) else {
+                fail("alias \(aliasValue) is not in a project, local, or user config (see 'secret print --all')")
+            }
+            if let expect = options.expect {
+                updateAliasDefinitionField(aliasValue, key: "expect", value: expect, configPath: owner.filePath, environment: environment)
+                success(expect.isEmpty ? "cleared the value rule for \(aliasValue)" : "set the value rule for \(aliasValue)")
+            }
+            if let backend = options.backend {
+                updateAliasDefinitionField(aliasValue, key: "backend", value: backend, configPath: owner.filePath, environment: environment)
+                success(backend.isEmpty ? "cleared the backend override for \(aliasValue)" : "set the backend for \(aliasValue) to \(backend)")
+            }
         }
         if let tags {
             guard let configPath = options.configPath ?? findProjectConfig() else {
@@ -2011,6 +2049,7 @@ func run() async {
                 continue
             }
             let resolvedValue = await resolveRequired(items, alias, definition)
+            requireNotExpired(definition, alias: alias, allowed: options.allowExpired)
             requireTypedValue(definition, alias: alias, value: resolvedValue)
             let value = dotenvValue(resolvedValue)
             if let source = await resolveOptional(items, SecretDefinition(item: definition.item, field: "custom:source")) {
@@ -2103,6 +2142,7 @@ func run() async {
                 continue
             }
             let resolvedValue = await resolveRequired(items, alias, definition)
+            requireNotExpired(definition, alias: alias, allowed: options.allowExpired)
             requireTypedValue(definition, alias: alias, value: resolvedValue)
             envVars[key] = resolvedValue
         }

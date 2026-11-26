@@ -105,3 +105,10 @@ func typedRuleIssues(alias: String, raw: String) -> [String] {
     guard known.contains(rule.kind) else { return ["\(alias): unknown type \(raw)"] }
     return []
 }
+
+/// An alias with a past `expiresAt` must not be injected: the value is the one
+/// somebody meant to rotate. `--allow-expired` is the explicit override.
+func requireNotExpired(_ definition: SecretDefinition, alias: String, allowed: Bool) {
+    guard !allowed, let raw = definition.expiresAt, let expiry = parseExpiry(raw), expiry < Date() else { return }
+    fail("\(alias) expired on \(raw): rotate it with 'secret rotate \(alias)' or extend it with 'secret edit \(alias) --expires-at <date>'; pass --allow-expired to inject it anyway")
+}

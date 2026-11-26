@@ -946,6 +946,7 @@ final class SecretBarModel: ObservableObject {
         expiresAt: String,
         environment: String,
         tags: [String],
+        backend: String = "",
         completion: @escaping @MainActor (Bool) -> Void
     ) {
         let cleanAlias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -974,6 +975,7 @@ final class SecretBarModel: ObservableObject {
         if !expiresAt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { arguments += ["--expires-at", expiresAt] }
         let cleanTags = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         if !cleanTags.isEmpty { arguments += ["--tags", cleanTags.joined(separator: ",")] }
+        if !backend.trimmingCharacters(in: .whitespaces).isEmpty { arguments += ["--backend", backend.trimmingCharacters(in: .whitespaces)] }
         let finalArguments = arguments
 
         setBusy(true)
@@ -1074,6 +1076,7 @@ final class SecretBarModel: ObservableObject {
         tags: [String],
         clearSource: Bool,
         clearNotes: Bool,
+        expect: String? = nil,
         completion: @escaping @MainActor (Bool) -> Void
     ) {
         let cleanName = itemName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1081,8 +1084,10 @@ final class SecretBarModel: ObservableObject {
         let cleanSource = source?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanNotes = notes?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanTags = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let cleanExpect = expect?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expectChanged = cleanExpect != nil && cleanExpect != (entry.expect ?? "")
         let tagsChanged = cleanTags != entry.tags
-        let hasChanges = !cleanName.isEmpty || !cleanValue.isEmpty || tagsChanged || clearSource || cleanSource?.isEmpty == false || clearNotes || cleanNotes?.isEmpty == false
+        let hasChanges = !cleanName.isEmpty || !cleanValue.isEmpty || tagsChanged || expectChanged || clearSource || cleanSource?.isEmpty == false || clearNotes || cleanNotes?.isEmpty == false
         guard hasChanges else {
             showError(title: "Nothing to save", message: "Enter a change first.")
             completion(false)
@@ -1094,6 +1099,7 @@ final class SecretBarModel: ObservableObject {
         if clearSource || cleanSource?.isEmpty == false { arguments += ["--source", clearSource ? "" : source ?? ""] }
         if clearNotes || cleanNotes?.isEmpty == false { arguments += ["--notes", clearNotes ? "" : notes ?? ""] }
         if tagsChanged { arguments += ["--tags", cleanTags.joined(separator: ",")] }
+        if expectChanged, let cleanExpect { arguments += ["--expect", cleanExpect] }
         let finalArguments = arguments
 
         setBusy(true)
@@ -1550,6 +1556,7 @@ struct SecretEditSheet: View {
     @State private var source = ""
     @State private var notes = ""
     @State private var tags: [String] = []
+    @State private var expectRule = ""
     @State private var clearSource = false
     @State private var clearNotes = false
 
@@ -1560,6 +1567,7 @@ struct SecretEditSheet: View {
         _itemName = State(initialValue: model.remoteMetadata[entry.id]?.itemName ?? "")
         _source = State(initialValue: model.remoteMetadata[entry.id]?.source ?? "")
         _tags = State(initialValue: entry.tags)
+        _expectRule = State(initialValue: entry.expect ?? "")
     }
 
     private var sourceValidationMessage: String? {
@@ -1666,6 +1674,18 @@ struct SecretEditSheet: View {
                                 .toggleStyle(.checkbox)
                         }
 
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Value rule")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            TextField("e.g. port, url, enum:dev,prod, string(startsWith=sk-)", text: $expectRule)
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityLabel("Value rule")
+                            Text("Checked by `secret env` and `secret run`; leave empty to remove it.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+
                         TagEditor(tags: $tags, title: "Tags", suggestions: model.entries.flatMap(\.tags))
                     }
                     .padding(.vertical, 2)
@@ -1676,7 +1696,7 @@ struct SecretEditSheet: View {
                     Spacer()
                     Button("Cancel") { onDismiss() }
                     Button("Save changes") {
-                        model.edit(entry, itemName: itemName, value: value, source: source, notes: notes, tags: tags, clearSource: clearSource, clearNotes: clearNotes) { updated in
+                        model.edit(entry, itemName: itemName, value: value, source: source, notes: notes, tags: tags, clearSource: clearSource, clearNotes: clearNotes, expect: expectRule) { updated in
                             if updated {
                                 onDismiss()
                             }
@@ -1946,6 +1966,7 @@ struct SecretBarView: View {
     @State private var createExpiresAt = ""
     @State private var createEnvironment = "prod"
     @State private var createTags: [String] = []
+    @State private var createBackend = ""
     @State private var showDotEnvImporter = false
     @State private var showImportPreview = false
     @State private var confirmClearHistory = false
@@ -2288,6 +2309,16 @@ struct SecretBarView: View {
                             TextField("prod", text: $createEnvironment)
                                 .textFieldStyle(.roundedBorder)
                         }
+                        LabeledContent("Backend") {
+                            Picker("Backend", selection: $createBackend) {
+                                Text("Default").tag("")
+                                Text("Bitwarden").tag("bitwarden")
+                                Text("1Password").tag("1password")
+                                Text("Keychain").tag("keychain")
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                        }
                     }
                 }
 
@@ -2432,7 +2463,7 @@ struct SecretBarView: View {
                     model.showError(title: "Cannot create secret", message: "No project scope is available.")
                     return
                 }
-                model.create(alias: createAlias, project: project, value: createValue, itemName: createItemName, source: createSource, notes: createNotes, itemType: createType, expiresAt: createExpiresAt, environment: createEnvironment, tags: createTags) { created in
+                model.create(alias: createAlias, project: project, value: createValue, itemName: createItemName, source: createSource, notes: createNotes, itemType: createType, expiresAt: createExpiresAt, environment: createEnvironment, tags: createTags, backend: createBackend) { created in
                     guard created else { return }
                     createAlias = ""
                     createItemName = ""
@@ -2442,6 +2473,7 @@ struct SecretBarView: View {
                     createExpiresAt = ""
                     createEnvironment = "prod"
                     createTags = []
+                    createBackend = ""
                     createType = .login
                     tab = .secrets
                 }

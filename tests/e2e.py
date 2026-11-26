@@ -73,7 +73,7 @@ def main():
     run(["set", "E2E_OTHER", "--force"], "synthetic-other-value-zzz999\n")
 
     out = run(["version"]).stdout.strip()
-    check("version", out == "secret 2.4.0", out)
+    check("version", out == "secret 2.5.0", out)
 
     result = run(["get", "E2E_TOKEN"])
     check("get", result.stdout.strip() == "synthetic-e2e-value-abc123", result.stderr)
@@ -140,9 +140,9 @@ def main():
     def text_of(reply_id):
         return replies[reply_id]["result"]["content"][0]["text"]
 
-    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.4.0")
+    check("mcp initialize", replies[1]["result"]["serverInfo"]["version"] == "2.5.0")
     names = [tool["name"] for tool in replies[2]["result"]["tools"]]
-    check("mcp tools/list", set(names) == {"secret_list", "secret_check", "secret_status", "secret_run"}, names)
+    check("mcp tools/list", set(names) == {"secret_list", "secret_check", "secret_status", "secret_scan", "secret_run"}, names)
     listing = json.loads(text_of(3))
     check("mcp list metadata", listing["count"] == 2)
     check("mcp list value-free", "synthetic-" not in mcp_raw)
@@ -201,6 +201,46 @@ def main():
     check("adopt removes it from unaliased", json.loads(run(["unaliased", "--json"]).stdout) == [])
     check("adopt refuses a duplicate", run(["adopt", "orphan-token", "--global"]).returncode != 0)
     check("adopt refuses an unknown item", run(["adopt", "ghost", "--global"]).returncode != 0)
+
+    # --- expiry enforcement + metadata editing
+    with open(os.path.join(proj, ".secret.json"), "w") as handle:
+        json.dump({"secrets": {
+            "STALE": {"item": "stale", "field": "password", "env": "STALE", "expiresAt": "2020-01-01"},
+            "FRESH": {"item": "fresh", "field": "password", "env": "FRESH"},
+        }}, handle)
+    with open(env["BW_FAKE_STATE"], "w") as handle:
+        json.dump({"items": [
+            {"id": "s1", "name": "stale", "login": {"password": "stale-value"}},
+            {"id": "f1", "name": "fresh", "login": {"password": "fresh-value"}},
+        ], "next": 3}, handle)
+    blocked = run(["env", "--export"])
+    check("expired alias blocks env", blocked.returncode != 0 and "STALE expired on 2020-01-01" in blocked.stderr, blocked.stderr)
+    check("expired message names the fix", "secret rotate STALE" in blocked.stderr)
+    allowed = run(["env", "--export", "--allow-expired"])
+    check("--allow-expired injects it anyway", "STALE=" in allowed.stdout, allowed.stdout + allowed.stderr)
+    ran = run(["run", "--", "/usr/bin/true"])
+    check("expired alias blocks run", ran.returncode != 0 and "STALE" in ran.stderr, ran.stderr)
+    check("edit --expect writes the rule", run(["edit", "FRESH", "--expect", "string(startsWith=fresh-)"]).returncode == 0)
+    check("edit --expect is in the config", '"expect": "string(startsWith=fresh-)"' in open(os.path.join(proj, ".secret.json")).read())
+    check("edit --expect empty clears it", run(["edit", "FRESH", "--expect", ""]).returncode == 0 and '"expect"' not in open(os.path.join(proj, ".secret.json")).read())
+    check("edit --backend writes the override", run(["edit", "FRESH", "--backend", "keychain"]).returncode == 0 and '"backend": "keychain"' in open(os.path.join(proj, ".secret.json")).read())
+
+    # --- mcp: secret_scan reports a leak without the value
+    with open(os.path.join(proj, ".secret.json"), "w") as handle:
+        json.dump({"secrets": {"FRESH": {"item": "fresh", "field": "password", "env": "FRESH"}}}, handle)
+    with open(os.path.join(proj, "leak.txt"), "w") as handle:
+        handle.write("token=fresh-value\n")
+    scan_messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "secret_scan", "arguments": {"paths": ["."]}}},
+    ]
+    scan_raw = run(["mcp"], "\n".join(json.dumps(m) for m in scan_messages) + "\n").stdout
+    scan_reply = next(json.loads(line) for line in scan_raw.splitlines() if '"id":2' in line)
+    scan_payload = json.loads(scan_reply["result"]["content"][0]["text"])
+    check("mcp scan finds the leak", scan_payload["matches"] >= 1 and any(h["alias"] == "FRESH" for h in scan_payload["hits"]), scan_payload)
+    check("mcp scan never prints the value", "fresh-value" not in scan_raw)
+    check("mcp scan flags an error for an agent", scan_reply["result"].get("isError") is True)
+    os.remove(os.path.join(proj, "leak.txt"))
 
     # --- generate kinds
     for kind, pattern in (("password", r"[!-~]{40}"), ("token", r"[A-Za-z0-9]{40}"), ("hex", r"[0-9a-f]{40}"), ("uuid", r"[0-9a-f-]{36}")):

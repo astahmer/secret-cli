@@ -613,14 +613,28 @@ func configWithAlias(
     return nil
 }
 
-func updateAliasTags(_ alias: String, _ tags: [String], configPath: String, environment: String) {
+/// Rewrite one key of an alias's definition in its owning config, at the
+/// requested environment. A nil value removes the key.
+func updateAliasDefinitionField(
+    _ alias: String,
+    key fieldKey: String,
+    value: String?,
+    tags: [String]? = nil,
+    configPath: String,
+    environment: String
+) {
     var config = readConfig(configPath)
     var updated = false
 
-    func withTags(_ definition: J) -> J {
-        let pairs = (definition.pairs() ?? []).filter { $0.0 != "tags" }
-        guard !tags.isEmpty else { return .obj(pairs) }
-        return .obj(pairs + [("tags", .arr(tags.map { .str($0) }))])
+    func withField(_ definition: J) -> J {
+        let pairs = (definition.pairs() ?? []).filter { $0.0 != fieldKey && !(fieldKey == "tags" && $0.0 == "tags") }
+        var next = pairs
+        if fieldKey == "tags" {
+            if let tags, !tags.isEmpty { next.append(("tags", .arr(tags.map { .str($0) }))) }
+            return .obj(next)
+        }
+        if let value, !value.isEmpty { next.append((fieldKey, .str(value))) }
+        return .obj(next)
     }
 
     func updateSecrets(_ value: J) -> J {
@@ -628,7 +642,7 @@ func updateAliasTags(_ alias: String, _ tags: [String], configPath: String, envi
         return .obj(secrets.map { key, definition in
             guard key == alias else { return (key, definition) }
             updated = true
-            return (key, withTags(definition))
+            return (key, withField(definition))
         })
     }
 
@@ -641,9 +655,7 @@ func updateAliasTags(_ alias: String, _ tags: [String], configPath: String, envi
         rootPairs = rootPairs.map { key, value in
             guard key == "environments", let environments = value.pairs() else { return (key, value) }
             let updatedEnvironments = environments.map { name, environmentValue in
-                guard name == environment,
-                      let environmentPairs = environmentValue.pairs()
-                else { return (name, environmentValue) }
+                guard name == environment, let environmentPairs = environmentValue.pairs() else { return (name, environmentValue) }
                 let updatedEnvironment = J.obj(environmentPairs.map { childKey, childValue in
                     childKey == "secrets" ? (childKey, updateSecrets(childValue)) : (childKey, childValue)
                 })
@@ -661,6 +673,10 @@ func updateAliasTags(_ alias: String, _ tags: [String], configPath: String, envi
     guard updated else { fail("alias \(alias) not found in \(configPath)") }
     config = .obj(rootPairs)
     writeAtomic(configPath, jStringify(config) + "\n")
+}
+
+func updateAliasTags(_ alias: String, _ tags: [String], configPath: String, environment: String) {
+    updateAliasDefinitionField(alias, key: "tags", value: nil, tags: tags, configPath: configPath, environment: environment)
 }
 
 func unsetAlias(_ alias: String, _ selectedConfig: String?, quiet: Bool = false) {

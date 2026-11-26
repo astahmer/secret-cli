@@ -272,6 +272,22 @@ func mcpToolsList() -> J {
             ])),
         ]),
         .obj([
+            ("name", .str("secret_scan")),
+            ("description", .str("Search files for the current value of the configured aliases. Reports file, line and alias only, never a value. Use it before committing or pasting code that may contain a real credential.")),
+            ("inputSchema", .obj([
+                ("type", .str("object")),
+                ("properties", .obj([
+                    ("paths", .obj([
+                        ("type", .arr([.str("string")])),
+                        ("description", .str("Files or directories to scan (default: the server's working directory).")),
+                    ])),
+                    ("env", .obj([("type", .str("string")), ("description", .str("Environment name (default prod)."))])),
+                    ("configPath", .obj([("type", .str("string")), ("description", .str("Path to a .secret.json instead of auto-detection."))])),
+                ])),
+                ("additionalProperties", .bool(false)),
+            ])),
+        ]),
+        .obj([
             ("name", .str("secret_run")),
             ("description", .str("Run a command with the project's aliases injected as environment variables. Values are never returned: exact value bytes in stdout/stderr are replaced with [scrubbed]. Use this instead of reading secrets.")),
             ("inputSchema", .obj([
@@ -363,6 +379,31 @@ func mcpCallCheck(_ args: J?) async -> J {
         ("note", .str("Availability only; the value is not returned.")),
     ])
     return mcpText(jStringify(payload, pretty: false))
+}
+
+func mcpCallScan(_ args: J?) async -> J {
+    let paths = mcpArgStrings(args, "paths") ?? []
+    let target = paths.isEmpty ? [FileManager.default.currentDirectoryPath] : paths
+    let loaded = mcpLoad(configPath: mcpArgString(args, "configPath"), environment: mcpEnvironment(args))
+    guard let loaded else { return mcpText("invalid or unreadable secret config", isError: true) }
+    let needles = await scanNeedles(loaded, [])
+    guard !needles.isEmpty else {
+        return mcpText("no configured value could be resolved — unlock the vault and retry; nothing was scanned")
+    }
+    var hits = Set<ScanHit>()
+    var filesScanned = 0
+    for path in target { walkForLeaks(path, needles: needles, into: &hits, filesScanned: &filesScanned) }
+    let ordered = hits.sorted { $0.path == $1.path ? $0.line < $1.line : $0.path < $1.path }
+    let payload: J = .obj([
+        ("scannedFiles", .num(Double(filesScanned))),
+        ("matches", .num(Double(ordered.count))),
+        ("hits", .arr(ordered.map { hit in
+            .obj([("path", .str(hit.path)), ("line", .num(Double(hit.line))), ("alias", .str(hit.alias))])
+        })),
+        ("note", .str("Paths, lines and alias names only. A hit means the value is in that file: remove it and rotate the alias.")),
+    ])
+    auditWrite(outcome: ordered.isEmpty ? "ok" : "error", error: ordered.isEmpty ? nil : "leak found", command: "mcp:scan", target: target.joined(separator: " "))
+    return mcpText(jStringify(payload, pretty: false), isError: !ordered.isEmpty)
 }
 
 func mcpCallStatus() async -> J {
@@ -481,6 +522,8 @@ func mcpToolCall(_ params: J?) async -> J {
         return await mcpCallList(args)
     case "secret_check":
         return await mcpCallCheck(args)
+    case "secret_scan":
+        return await mcpCallScan(args)
     case "secret_status":
         return await mcpCallStatus()
     case "secret_run":
@@ -497,7 +540,8 @@ func mcpInitializeResult(_ params: J?) -> J {
     let instructions = """
     Secret values are never returned by this server. Use secret_run to run a command with values \
     injected as environment variables; its stdout/stderr are scrubbed. secret_list and secret_check \
-    expose metadata only. Reads through the CLI (`secret get`) belong to humans, not agents.
+    expose metadata only, and secret_scan reports where a configured value leaked without printing it. \
+    Reads through the CLI (`secret get`) belong to humans, not agents.
     """
     return .obj([
         ("protocolVersion", .str(version)),
